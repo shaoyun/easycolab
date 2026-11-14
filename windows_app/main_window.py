@@ -1284,7 +1284,7 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
         last_b64: Optional[str] = None
         if spec.modality in (ModelModality.VIDEO_AUDIO, ModelModality.VIDEO):
             self.vm.visual_prompt = self.vid_visual_edit.toPlainText()
-            if self.vm.task_mode_id == "fl2va":
+            if self.vm.task_mode_id in ("fl2va", "ref2va"):
                 first_b64 = self.video_first_well.to_jpeg_base64()
                 last_b64 = self.video_last_well.to_jpeg_base64()
         elif spec.modality == ModelModality.LLM_VLM:
@@ -1649,7 +1649,7 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
         # 6. Active Modality Studio Routing
         if spec.modality in (ModelModality.VIDEO_AUDIO, ModelModality.VIDEO):
             self.studio_stack.setCurrentIndex(0)
-            self.video_frames_card.setVisible(self.vm.task_mode_id == "fl2va")
+            self.video_frames_card.setVisible(self.vm.task_mode_id in ("fl2va", "ref2va"))
             self.shared_media_split.setVisible(True)
             self.right_gallery_stack.setCurrentIndex(0)
             self._update_gen_bar(

@@ -674,7 +674,17 @@ class StudioViewModel: ObservableObject {
     }
 
     var isSelectedModelLoadedInVRAM: Bool {
-        loadedModelIds.contains(selectedModelId) || (modelLoaded && loadedModelId == selectedModelId)
+        if loadedModelIds.contains(selectedModelId) || (modelLoaded && loadedModelId == selectedModelId) {
+            return true
+        }
+        // MiniMax-H3 与 MiniMax-H3-Ref2VA 共享 MiniMaxH3Pipeline 架构，任一在显存均可响应视频推理请求
+        if ["minimax_h3", "minimax_h3_ref2va"].contains(selectedModelId) {
+            let altId = selectedModelId == "minimax_h3" ? "minimax_h3_ref2va" : "minimax_h3"
+            if loadedModelIds.contains(altId) || (modelLoaded && loadedModelId == altId) {
+                return true
+            }
+        }
+        return false
     }
 
     var isMiniMaxH3ImageModel: Bool {
@@ -1240,6 +1250,13 @@ class StudioViewModel: ObservableObject {
             )
             return
         }
+        if taskModeId == "ref2va" && firstFrameImage == nil && lastFrameImage == nil {
+            statusMessage = L(
+                "在「主体参考图生视频 (Ref2VA)」模式下，请至少拖入一张角色或场景参考图（提示词中可用 <Picture 1> 引用）。",
+                "In Reference-to-Video (Ref2VA) mode, please drop at least one subject or scene reference image (refer via <Picture 1>)."
+            )
+            return
+        }
         if taskModeId == "i2v" && firstFrameImage == nil {
             statusMessage = L(
                 "在「首帧图生视频」模式下，请提供一张首帧图片。",
@@ -1347,7 +1364,7 @@ class StudioViewModel: ObservableObject {
                 payload["chat_messages"] = chatPayload
             }
 
-            let needsImage = ["fl2va", "i2v", "i2i_edit", "vlm"].contains(taskModeId)
+            let needsImage = ["fl2va", "ref2va", "i2v", "i2i_edit", "vlm"].contains(taskModeId)
             if needsImage {
                 if let firstImg = firstFrameImage, let b64 = encodeImageToBase64(firstImg) {
                     payload["first_frame_base64"] = b64

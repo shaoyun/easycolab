@@ -1104,7 +1104,7 @@ private fun VideoAndImageWorkspaceSection(vm: StudioViewModel) {
     val context = LocalContext.current
     val spec = vm.activeModelSpec
     val isVideo = spec.modality == ModelModality.VIDEO_AUDIO
-    val needsPhotos = vm.taskModeId in listOf("fl2va", "i2i_edit")
+    val needsPhotos = vm.taskModeId in listOf("fl2va", "ref2va", "i2i_edit")
     var showAdvancedParams by remember { mutableStateOf(false) }
 
     val pickFirstLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->

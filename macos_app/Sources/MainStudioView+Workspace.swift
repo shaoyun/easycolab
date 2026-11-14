@@ -21,8 +21,8 @@ extension MainStudioView {
                     // API 协议网关专属面板（OpenAI + Anthropic 双协议配置与一键复制）
                     apiGatewaySection(palette: palette)
                 } else {
-                    // 2. 参考图上传区（在首尾帧、图生视频、指令修图、视觉理解模式下自动展开）
-                    if ["fl2va", "i2v", "i2i_edit", "vlm"].contains(vm.taskModeId) {
+                    // 2. 参考图上传区（在首尾帧、主体参考图生视频、图生视频、指令修图、视觉理解模式下自动展开）
+                    if ["fl2va", "ref2va", "i2v", "i2i_edit", "vlm"].contains(vm.taskModeId) {
                         referenceImageSection
                     }
 
@@ -1128,6 +1128,28 @@ extension MainStudioView {
                     FrameDropWell(
                         title: L("结束尾帧 (可选 · Index -1)", "End Frame (Optional · Index -1)"),
                         subtitle: L("拖入图片或点击选择", "Drop an image or click to browse"),
+                        image: $vm.lastFrameImage
+                    )
+                }
+            }
+        case "ref2va":
+            WorkspaceCard(
+                title: L("主体 / 角色参考图 (Ref2VA)", "Subject / Character Reference Images (Ref2VA)"),
+                subtitle: L(
+                    "上传 1~2 张角色、主体或场景参考图，并在画面提示词中使用 <Picture 1>、<Picture 2> 指代对应主体",
+                    "Drop 1–2 character, subject, or scene references and refer to them as <Picture 1>, <Picture 2> in your prompt"
+                ),
+                icon: "person.2.crop.square.stack"
+            ) {
+                HStack(spacing: 12) {
+                    FrameDropWell(
+                        title: L("参考图 1 (<Picture 1> · 必选)", "Reference 1 (<Picture 1> · Required)"),
+                        subtitle: L("拖入主体/角色参考图 1", "Drop subject/character reference 1"),
+                        image: $vm.firstFrameImage
+                    )
+                    FrameDropWell(
+                        title: L("参考图 2 (<Picture 2> · 可选)", "Reference 2 (<Picture 2> · Optional)"),
+                        subtitle: L("拖入第二张主体或场景参考图", "Drop second subject or scene reference"),
                         image: $vm.lastFrameImage
                     )
                 }

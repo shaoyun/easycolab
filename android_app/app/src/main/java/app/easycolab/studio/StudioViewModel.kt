@@ -1402,7 +1402,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             statusMessage = L("请先输入提示词或对话内容！", "Please enter a prompt first!")
             return
         }
-        if ((taskModeId == "fl2va" || taskModeId == "i2i_edit") && firstFrameBitmap == null && lastFrameBitmap == null) {
+        if ((taskModeId == "fl2va" || taskModeId == "ref2va" || taskModeId == "i2i_edit") && firstFrameBitmap == null && lastFrameBitmap == null) {
             statusMessage = L("请先从手机相册选择至少 1 张参考图片。", "Please select at least 1 reference photo first.")
             return
         }
@@ -1478,7 +1478,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         .put("reasoning_effort", reasoningEffort)
 
                     if (chatPayload.length() > 0) obj.put("chat_messages", chatPayload)
-                    if (taskModeId in listOf("fl2va", "i2v", "i2i_edit", "vlm")) {
+                    if (taskModeId in listOf("fl2va", "ref2va", "i2v", "i2i_edit", "vlm")) {
                         firstFrameBitmap?.let { obj.put("first_frame_base64", bitmapToBase64Jpeg(it)) }
                         lastFrameBitmap?.let { obj.put("last_frame_base64", bitmapToBase64Jpeg(it)) }
                     }

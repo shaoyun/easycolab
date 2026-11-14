@@ -1336,6 +1336,24 @@ MINIMAX_H3_BF16_FILES = (
     ]
 )
 
+MINIMAX_H3_REF2VA_BF16_FILES = (
+    [
+        (f"Ref2VA/transformer/model-{i:05d}-of-00013.safetensors", f"Ref2VA 主体参考 DiT 主干 BF16 {i}/13")
+        for i in range(1, 14)
+    ]
+    + [
+        (
+            f"Ref2VA/text_encoder/model-{i:05d}-of-00014.safetensors",
+            f"多模态文本编码器 BF16 {i}/14 (与 MiniMax-H3 自动共享)",
+        )
+        for i in range(1, 15)
+    ]
+    + [
+        ("Ref2VA/video_vae/source/model.safetensors", "3D 视频 VAE 解码器 BF16 (约 9.7 GB · 与 MiniMax-H3 自动共享)"),
+        ("Ref2VA/audio_vae/model.safetensors", "32kHz 立体声 VAE 解码器 BF16 (约 0.56 GB · 与 MiniMax-H3 自动共享)"),
+    ]
+)
+
 # ==============================================================================
 # 开源旗舰多模型注册中心 (Hugging Face Top Models 2026 · 全量免审核 Gated=False)
 # ==============================================================================
@@ -1345,9 +1363,19 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "name": "MiniMax-H3 (33B)",
         "repo_id": "MiniMaxAI/MiniMax-H3",
         "modality": "video_audio",
-        "category": "全模态音视频生成 · BF16 原生满血 · 32kHz 立体声",
+        "category": "全模态音视频生成 · 文生/首尾帧/参考图 · BF16 原生满血 · 32kHz 立体声",
         "approx_size_gb": 134.1,
         "files": MINIMAX_H3_BF16_FILES,
+    },
+    "minimax_h3_ref2va": {
+        "id": "minimax_h3_ref2va",
+        "name": "MiniMax-H3-Ref2VA (33B · 多参考图)",
+        "repo_id": "MiniMaxAI/MiniMax-H3",
+        "modality": "video_audio",
+        "pipeline_arch": "minimax_h3_ref2va",
+        "category": "多主体参考图生有声视频 (Ref2VA) · 零拷贝共享 72.4GB 编码器与双 VAE",
+        "approx_size_gb": 134.1,
+        "files": MINIMAX_H3_REF2VA_BF16_FILES,
     },
     "minimax_h3_image": {
         "id": "minimax_h3_image",
@@ -1448,6 +1476,8 @@ def _normalize_builtin_model_alias(model_id: Optional[str], repo_id: str = "") -
     rlow = (repo_id or "").strip().lower()
     if mid in ("custom_minimaxai_minimax_h3_image", "minimax-h3-image") or rlow == "minimaxai/minimax-h3-image":
         return "minimax_h3_image"
+    if mid in ("custom_minimaxai_minimax_h3_ref2va", "minimax-h3-ref2va"):
+        return "minimax_h3_ref2va"
     return mid or None
 
 
@@ -2067,7 +2097,18 @@ def inspect_and_resolve_hf_repo(
         raise ValueError(f"无效的 HuggingFace 仓库地址: '{repo_id}'（格式应为 Owner/Repo）")
 
     repo_low = repo_clean.lower()
+    pat_low = pat_clean.lower()
     # 兼容已知特定多模态/图像生成仓库结构（如用户在客户端手动导入）
+    if repo_low == "minimaxai/minimax-h3" and "ref2va" in pat_low:
+        return {
+            "repo_id": repo_clean,
+            "include_pattern": "Ref2VA/*",
+            "modality": "video_audio",
+            "pipeline_arch": "minimax_h3_ref2va",
+            "category": "原生内置专享 · 多张角色/主体参考图生视频 (Ref2VA) · 32kHz 立体声",
+            "approx_size_gb": 134.1,
+            "files": list(MINIMAX_H3_REF2VA_BF16_FILES),
+        }
     if not pat_clean:
         if repo_low == "minimaxai/minimax-h3-image" or ("minimax-h3-image" in repo_low and "gguf" not in repo_low):
             m_img_spec = MODEL_CATALOG["minimax_h3_image"]
@@ -2079,6 +2120,16 @@ def inspect_and_resolve_hf_repo(
                 "category": "原生内置专享 · 6 步 4K (16MP) 文生图与多参考图指令修图",
                 "approx_size_gb": m_img_spec["approx_size_gb"],
                 "files": list(MINIMAX_H3_IMAGE_FILES),
+            }
+        if repo_low == "minimaxai/minimax-h3-ref2va" or ("minimax-h3" in repo_low and "ref2va" in repo_low):
+            return {
+                "repo_id": "MiniMaxAI/MiniMax-H3",
+                "include_pattern": "Ref2VA/*",
+                "modality": "video_audio",
+                "pipeline_arch": "minimax_h3_ref2va",
+                "category": "原生内置专享 · 多张角色/主体参考图生视频 (Ref2VA) · 32kHz 立体声",
+                "approx_size_gb": 134.1,
+                "files": list(MINIMAX_H3_REF2VA_BF16_FILES),
             }
         if repo_low == "minimaxai/minimax-h3" or ("minimax-h3" in repo_low and "image" not in repo_low and "gguf" not in repo_low):
             return {
@@ -2381,6 +2432,16 @@ def register_custom_hf_model_core(
         )
         repo_clean = resolved["repo_id"]
         pat_clean = resolved["include_pattern"]
+        if resolved.get("pipeline_arch") == "minimax_h3_ref2va":
+            SELECTED_MODEL_ID = "minimax_h3_ref2va"
+            builtin_spec = MODEL_CATALOG["minimax_h3_ref2va"]
+            msg = (
+                "已自动切换至内置专属引擎「MiniMax-H3-Ref2VA (33B · 多参考图)」"
+                "（仅需增量下载 13 个 Ref2VA DiT 分片，自动零拷贝共享 MiniMax-H3 的 72.4GB 编码器与音视频 VAE）！"
+            )
+            MODEL_DOWNLOAD_STATE["message"] = msg
+            print(f"[MiniMax-H3-Ref2VA] {msg}")
+            return True, msg, builtin_spec
         if repo_clean.lower() == "minimaxai/minimax-h3-image" and not pat_clean:
             with CUSTOM_MODELS_LOCK:
                 stale_ids = [
@@ -3016,8 +3077,8 @@ def _get_model_dirs(model_id: str) -> Tuple[Optional[str], str, str]:
     repo_sub = spec["repo_id"]
     pipeline_arch = spec.get("pipeline_arch") or model_id
     ram_dir = None
-    # MiniMax-H3 / MiniMax-H3-Image (~135GB) 推理期依赖 CPU DDR5 内存热备或 ComponentsManager 轮换，禁止拷入 /dev/shm 以免与匿名内存争抢 Cgroup 上限
-    if os.path.exists("/dev/shm") and pipeline_arch not in ("minimax_h3_image", "minimax_h3"):
+    # MiniMax-H3 / MiniMax-H3-Ref2VA / MiniMax-H3-Image (~135GB) 推理期依赖 CPU DDR5 内存热备或 ComponentsManager 轮换，禁止拷入 /dev/shm 以免与匿名内存争抢 Cgroup 上限
+    if os.path.exists("/dev/shm") and pipeline_arch not in ("minimax_h3_image", "minimax_h3", "minimax_h3_ref2va"):
         try:
             shm_free_gb = _safe_shm_available_bytes(reserve_ram_gb=34.0) / (1024 ** 3)
             # 仅当 /dev/shm 配额与容器真实可用物理内存均足以容纳模型时才把新模型放入内存盘
@@ -3058,18 +3119,32 @@ def _find_existing_model_file(model_id: str, fname: str, _allow_peer_share: bool
         if os.path.exists(p) and os.path.getsize(p) > 64 * 1024:
             return p
 
-    # MiniMax-H3 与 MiniMax-H3-Image 的 14 个 32B VLM text_encoder 分片 (66.7 GB) 二进制 100% 一致，支持双向零拷贝共享免重复下载！
+    # MiniMax-H3 (FL2VA) / MiniMax-H3-Ref2VA / MiniMax-H3-Image 的 14 个 32B VLM text_encoder 分片 (62.1 GB) 二进制 100% 一致，
+    # 且 FL2VA 与 Ref2VA 的 3D 视频 VAE (9.7 GB) 及 32kHz 音频 VAE (0.56 GB) 同样 100% 一致，支持三方零拷贝共享免重复下载！
     if _allow_peer_share:
         if pipeline_arch == "minimax_h3_image" and fname.startswith("text_encoder/model-") and fname.endswith("-of-00014.safetensors"):
-            peer_fname = f"FL2VA/{fname}"
-            peer_hit = _find_existing_model_file("minimax_h3", peer_fname, _allow_peer_share=False)
-            if peer_hit:
-                return peer_hit
-        elif pipeline_arch == "minimax_h3" and fname.startswith("FL2VA/text_encoder/model-") and fname.endswith("-of-00014.safetensors"):
-            peer_fname = fname[len("FL2VA/"):]
-            peer_hit = _find_existing_model_file("minimax_h3_image", peer_fname, _allow_peer_share=False)
-            if peer_hit:
-                return peer_hit
+            for peer_id, peer_prefix in (("minimax_h3", "FL2VA/"), ("minimax_h3_ref2va", "Ref2VA/")):
+                peer_hit = _find_existing_model_file(peer_id, f"{peer_prefix}{fname}", _allow_peer_share=False)
+                if peer_hit:
+                    return peer_hit
+        elif pipeline_arch in ("minimax_h3", "minimax_h3_ref2va"):
+            own_prefix = "Ref2VA/" if pipeline_arch == "minimax_h3_ref2va" else "FL2VA/"
+            alt_video_id = "minimax_h3" if pipeline_arch == "minimax_h3_ref2va" else "minimax_h3_ref2va"
+            alt_prefix = "FL2VA/" if pipeline_arch == "minimax_h3_ref2va" else "Ref2VA/"
+            if fname.startswith(own_prefix):
+                rel_tail = fname[len(own_prefix):]
+                if rel_tail.startswith("text_encoder/model-") and rel_tail.endswith("-of-00014.safetensors"):
+                    for peer_id, peer_fname in (
+                        (alt_video_id, f"{alt_prefix}{rel_tail}"),
+                        ("minimax_h3_image", rel_tail),
+                    ):
+                        peer_hit = _find_existing_model_file(peer_id, peer_fname, _allow_peer_share=False)
+                        if peer_hit:
+                            return peer_hit
+                elif rel_tail in ("video_vae/source/model.safetensors", "audio_vae/model.safetensors"):
+                    peer_hit = _find_existing_model_file(alt_video_id, f"{alt_prefix}{rel_tail}", _allow_peer_share=False)
+                    if peer_hit:
+                        return peer_hit
     return None
 
 
@@ -3124,7 +3199,7 @@ def check_model_files_status(model_id: Optional[str] = None) -> Dict[str, Any]:
         "ramdisk_enabled": ram_dir is not None,
         "ram_cached_count": ram_cached_count,
         "model_storage_path": ram_dir or drive_dir,
-        "bf16_shards_count": downloaded_count if target_id == "minimax_h3" else 0,
+        "bf16_shards_count": downloaded_count if target_id in ("minimax_h3", "minimax_h3_ref2va") else 0,
     }
 
 
@@ -3534,11 +3609,12 @@ def download_model_weights_core(model_id: Optional[str] = None, hf_token: str = 
             MODEL_DOWNLOAD_STATE["message"] = f"正在获取 {spec['name']} 的分词器与 Processor 配置文件..."
             from huggingface_hub import snapshot_download
 
-            if pipeline_arch == "minimax_h3":
+            if pipeline_arch in ("minimax_h3", "minimax_h3_ref2va"):
                 from diffsynth.pipelines.minimax_h3_audio_video import ModelConfig
+                proc_prefix = "Ref2VA" if pipeline_arch == "minimax_h3_ref2va" else "FL2VA"
                 proc_cfg = ModelConfig(
                     model_id=repo_id or "MiniMaxAI/MiniMax-H3",
-                    origin_file_pattern="FL2VA/processor/",
+                    origin_file_pattern=f"{proc_prefix}/processor/",
                     download_source="huggingface",
                 )
                 proc_cfg.download_if_necessary()
@@ -4594,7 +4670,7 @@ def _ensure_vram_for_new_model_locked(target_id: str, required_free_gb: float) -
         used_v = max(0.0, total_v - raw_free)
         # ComponentsManager 在空闲期将 62GB 主干暂存 CPU 内存（当前显存占用接近 0），推理期需瞬时占用 ~64GB 显存
         has_cpu_offloaded_giant = any(
-            mid in ("minimax_h3", "minimax_h3_image")
+            mid in ("minimax_h3", "minimax_h3_ref2va", "minimax_h3_image")
             or "ComponentsManager" in str(rt.get("mode_label", ""))
             or "内存热备" in str(rt.get("mode_label", ""))
             for mid, rt in LOADED_RUNTIMES.items()
@@ -4606,7 +4682,7 @@ def _ensure_vram_for_new_model_locked(target_id: str, required_free_gb: float) -
 
     target_spec = MODEL_CATALOG.get(target_id, {})
     target_arch = target_spec.get("pipeline_arch") or target_id
-    needs_heavy_cpu_ram = target_arch in ("minimax_h3", "minimax_h3_image")
+    needs_heavy_cpu_ram = target_arch in ("minimax_h3", "minimax_h3_ref2va", "minimax_h3_image")
 
     while LOADED_RUNTIMES:
         eff_free = _effective_free_vram_gb()
@@ -4718,7 +4794,7 @@ def load_model_to_vram_core(
             elif pipeline_arch in ("qwen38_27b_gguf", "gguf"):
                 q4_kv_gb = (ctx_len / 262144.0) * 4.6
                 required_free_gb = min(max(12.0, approx_gb + 2.0 + q4_kv_gb), max(12.0, total_vram_gb - 1.2))
-            elif pipeline_arch in ("minimax_h3", "minimax_h3_image"):
+            elif pipeline_arch in ("minimax_h3", "minimax_h3_ref2va", "minimax_h3_image"):
                 # BF16 单阶段峰值约 62.5GB；在 G4 (96GB) 上可与 Qwen3.8-GGUF (~21GB) 同时共驻显存
                 required_free_gb = min(65.0, max(24.0, total_vram_gb - 5.0))
             elif pipeline_arch == "transformers":
@@ -4747,7 +4823,7 @@ def load_model_to_vram_core(
             mode_label = spec["name"]
             repo_id = spec.get("repo_id", "")
 
-            if pipeline_arch == "minimax_h3":
+            if pipeline_arch in ("minimax_h3", "minimax_h3_ref2va"):
                 from diffsynth.pipelines.minimax_h3_audio_video import MiniMaxH3Pipeline, ModelConfig
 
                 _trim_linux_cpu_heap()
@@ -4763,24 +4839,25 @@ def load_model_to_vram_core(
                     "computation_device": "cuda",
                 }
 
-                te_rel_names = [f"FL2VA/text_encoder/model-{i:05d}-of-00014.safetensors" for i in range(1, 15)]
-                dit_rel_names = [f"FL2VA/transformer/model-{i:05d}-of-00013.safetensors" for i in range(1, 14)]
+                part_prefix = "Ref2VA" if pipeline_arch == "minimax_h3_ref2va" else "FL2VA"
+                te_rel_names = [f"{part_prefix}/text_encoder/model-{i:05d}-of-00014.safetensors" for i in range(1, 15)]
+                dit_rel_names = [f"{part_prefix}/transformer/model-{i:05d}-of-00013.safetensors" for i in range(1, 14)]
 
                 MODEL_DOWNLOAD_STATE["progress"] = 0.22
-                MODEL_DOWNLOAD_STATE["message"] = "正在映射 MiniMax-H3 BF16 多模态编码器权重 (14 分片)..."
+                MODEL_DOWNLOAD_STATE["message"] = f"正在映射 {spec['name']} 多模态编码器权重 (14 分片)..."
                 te_paths = [_resolve_and_stage_model_file(target_id, fn) for fn in te_rel_names]
 
                 MODEL_DOWNLOAD_STATE["progress"] = 0.42
-                MODEL_DOWNLOAD_STATE["message"] = "正在映射 MiniMax-H3 BF16 33B DiT 主干权重 (13 分片)..."
+                MODEL_DOWNLOAD_STATE["message"] = f"正在映射 {spec['name']} 33B DiT 主干权重 (13 分片)..."
                 dit_paths = [_resolve_and_stage_model_file(target_id, fn) for fn in dit_rel_names]
 
                 MODEL_DOWNLOAD_STATE["progress"] = 0.58
                 MODEL_DOWNLOAD_STATE["message"] = "正在映射 3D 视频 VAE 与 32kHz 立体声 VAE 权重..."
                 vvae_path = _resolve_and_stage_model_file(
-                    target_id, "FL2VA/video_vae/source/model.safetensors"
+                    target_id, f"{part_prefix}/video_vae/source/model.safetensors"
                 )
                 avae_path = _resolve_and_stage_model_file(
-                    target_id, "FL2VA/audio_vae/model.safetensors"
+                    target_id, f"{part_prefix}/audio_vae/model.safetensors"
                 )
 
                 # 基于分片映射完成后的真实可用系统内存自适应选择热备策略（严守 >=24GB CPU 内存安全余量，杜绝 /dev/shm + 匿名内存叠加触发 Cgroup OOM）：
@@ -4796,23 +4873,23 @@ def load_model_to_vram_core(
                     ram_residency_tag = "双主干内存热备"
                     print(
                         f"⚡ [G4 大内存热备] 检测到充裕系统内存 ({avail_ram_gb:.1f}/{total_ram_gb:.1f} GB)，"
-                        "已启用 32B 文本编码器 + 33B DiT 双主干 DDR5 内存常驻热备（阶段切换仅需 ~5 秒）！"
+                        f"已启用 {spec['name']} 32B 文本编码器 + 33B DiT 双主干 DDR5 内存常驻热备（阶段切换仅需 ~5 秒）！"
                     )
                     MODEL_DOWNLOAD_STATE["progress"] = 0.68
                     MODEL_DOWNLOAD_STATE["message"] = (
-                        f"正在将 MiniMax-H3 预装载至 {total_ram_gb:.0f}GB 高速系统内存热备池（首次载入后换提示词仅需 ~5 秒）..."
+                        f"正在将 {spec['name']} 预装载至 {total_ram_gb:.0f}GB 高速系统内存热备池（首次载入后换提示词仅需 ~5 秒）..."
                     )
                 elif avail_ram_gb >= 88.0:
                     te_cfg = cpu_fast_vram_config
                     dit_paths = _stage_model_files_to_local_nvme(
-                        target_id, dit_paths, dit_rel_names, "MiniMax-H3 33B DiT 主干"
+                        target_id, dit_paths, dit_rel_names, f"{spec['name']} 33B DiT 主干"
                     )
                     dit_cfg = vram_config
                     vae_cfg = cpu_fast_vram_config
                     ram_residency_tag = "编码器内存热备"
                     print(
                         f"⚡ [混合内存热备] 系统可用内存 {avail_ram_gb:.1f}/{total_ram_gb:.1f} GB，"
-                        "已将 32B 文本编码器锁入系统内存热备（换提示词 ~5 秒极速换入），DiT 走本地高速存储！"
+                        f"已将 {spec['name']} 32B 文本编码器锁入系统内存热备（换提示词 ~5 秒极速换入），DiT 走本地高速存储！"
                     )
                     MODEL_DOWNLOAD_STATE["progress"] = 0.68
                     MODEL_DOWNLOAD_STATE["message"] = (
@@ -4820,16 +4897,16 @@ def load_model_to_vram_core(
                     )
                 else:
                     te_paths = _stage_model_files_to_local_nvme(
-                        target_id, te_paths, te_rel_names, "MiniMax-H3 多模态编码器"
+                        target_id, te_paths, te_rel_names, f"{spec['name']} 多模态编码器"
                     )
                     dit_paths = _stage_model_files_to_local_nvme(
-                        target_id, dit_paths, dit_rel_names, "MiniMax-H3 33B DiT 主干"
+                        target_id, dit_paths, dit_rel_names, f"{spec['name']} 33B DiT 主干"
                     )
                     te_cfg = vram_config
                     dit_cfg = vram_config
                     vae_cfg = vram_config
                     MODEL_DOWNLOAD_STATE["progress"] = 0.72
-                    MODEL_DOWNLOAD_STATE["message"] = "正在构建 MiniMax-H3 BF16 原生 GPU 计算图与 Processor..."
+                    MODEL_DOWNLOAD_STATE["message"] = f"正在构建 {spec['name']} BF16 原生 GPU 计算图与 Processor..."
 
                 new_pipe = MiniMaxH3Pipeline.from_pretrained(
                     torch_dtype=torch.bfloat16,
@@ -4842,7 +4919,7 @@ def load_model_to_vram_core(
                     ],
                     processor_config=ModelConfig(
                         model_id=repo_id or "MiniMaxAI/MiniMax-H3",
-                        origin_file_pattern="FL2VA/processor/",
+                        origin_file_pattern=f"{part_prefix}/processor/",
                         download_source="huggingface",
                     ),
                     vram_limit=vram_limit,
@@ -5447,6 +5524,21 @@ def _run_pipeline_with_smart_tiling(pipe, call_kwargs: dict):
         except Exception:
             pass
 
+    def _invoke_pipe_with_ref_compat(p, kw: Dict[str, Any]):
+        try:
+            return p(**kw)
+        except TypeError as te:
+            # 兼容尚未升级 references 参数的旧版 DiffSynth MiniMaxH3Pipeline（自动平滑降级为首尾帧 keyframes）
+            if "references" in kw and "unexpected keyword argument" in str(te):
+                refs = kw.get("references") or []
+                imgs = [r.get("image") for r in refs if isinstance(r, dict) and r.get("image") is not None]
+                fb_kw = {k: v for k, v in kw.items() if k != "references"}
+                if imgs:
+                    fb_kw["keyframes"] = imgs[:2]
+                    fb_kw["keyframe_indices"] = [0] if len(imgs) == 1 else [0, -1]
+                return p(**fb_kw)
+            raise
+
     if getattr(pipe, "_high_vram_fast_mode", False) and "tiled" not in call_kwargs:
         try:
             free_gb = torch.cuda.mem_get_info("cuda")[0] / (1024 ** 3)
@@ -5456,14 +5548,14 @@ def _run_pipeline_with_smart_tiling(pipe, call_kwargs: dict):
             fast_kwargs = dict(call_kwargs)
             fast_kwargs["tiled"] = False
             try:
-                return pipe(**fast_kwargs)
+                return _invoke_pipe_with_ref_compat(pipe, fast_kwargs)
             except torch.cuda.OutOfMemoryError:
                 print("⚠️ 整帧 VAE 解码显存触顶，正在清理缓存并自动切换为 Tiled 分块安全解码...")
                 _reclaim_transient_gpu_memory()
     safe_kwargs = dict(call_kwargs)
     safe_kwargs.setdefault("tiled", True)
     try:
-        return pipe(**safe_kwargs)
+        return _invoke_pipe_with_ref_compat(pipe, safe_kwargs)
     except torch.cuda.OutOfMemoryError:
         if pipe.__class__.__name__ == "MiniMaxH3Pipeline" and not safe_kwargs.get("use_gradient_checkpointing"):
             print("⚠️ 超长序列注意力显存触顶，正在自动释放闲置子模块并启用梯度检查点安全重试...")
@@ -5479,7 +5571,7 @@ def _run_pipeline_with_smart_tiling(pipe, call_kwargs: dict):
             _reclaim_transient_gpu_memory()
             gc_kwargs = dict(safe_kwargs)
             gc_kwargs["use_gradient_checkpointing"] = True
-            return pipe(**gc_kwargs)
+            return _invoke_pipe_with_ref_compat(pipe, gc_kwargs)
         raise
 
 
@@ -5533,6 +5625,7 @@ def generate_video(
 
     keyframes = []
     keyframe_indices = []
+    references = []
     if task_mode == "fl2va":
         if first_frame_img is not None:
             keyframes.append(first_frame_img.convert("RGB"))
@@ -5544,6 +5637,17 @@ def generate_video(
             return (
                 None,
                 "⚠️ 在「首尾帧图生视频」模式下，请至少上传一张【首帧图片】或【尾帧图片】！",
+                seed,
+                get_history_videos(save_dir),
+            )
+    elif task_mode == "ref2va":
+        for ref_im in (first_frame_img, last_frame_img):
+            if ref_im is not None:
+                references.append({"type": "image", "image": ref_im.convert("RGB")})
+        if not references:
+            return (
+                None,
+                "⚠️ 在「主体参考图生视频 (Ref2VA)」模式下，请至少上传一张参考图片（提示词中可用 `<Picture 1>`、`<Picture 2>` 引用）！",
                 seed,
                 get_history_videos(save_dir),
             )
@@ -5572,6 +5676,8 @@ def generate_video(
             if keyframes:
                 call_kwargs["keyframes"] = keyframes
                 call_kwargs["keyframe_indices"] = keyframe_indices
+            elif references:
+                call_kwargs["references"] = references
 
             _reclaim_transient_gpu_memory()
             video, audio = _run_pipeline_with_smart_tiling(PIPELINE, call_kwargs)
@@ -7492,6 +7598,7 @@ class GenerateVideoRequest(BaseModel):
     music_prompt: str = ""
     first_frame_base64: Optional[str] = None
     last_frame_base64: Optional[str] = None
+    ref_images_base64: Optional[List[str]] = None
     width: int = 832
     height: int = 480
     num_frames: int = 124
@@ -7967,6 +8074,18 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
             _run_qwen_llm_job(job_id, req, target_llm_id=active_model_id)
             return
 
+        # 智能路由 MiniMax-H3 与 MiniMax-H3-Ref2VA：
+        # 1. 若用户在 MiniMax-H3 下选择 ref2va 模式且 minimax_h3_ref2va 已在显存，优先命中 Ref2VA 专用主干；
+        # 2. 若请求的模型未加载但配对兄弟模型已加载，自动复用已驻留的 MiniMaxH3Pipeline 管线免重复加载报错。
+        if active_model_id == "minimax_h3" and req.task_mode == "ref2va" and "minimax_h3_ref2va" in LOADED_RUNTIMES:
+            active_model_id = "minimax_h3_ref2va"
+            JOBS[job_id]["model_id"] = active_model_id
+        elif active_model_id not in LOADED_RUNTIMES:
+            if active_model_id == "minimax_h3_ref2va" and "minimax_h3" in LOADED_RUNTIMES:
+                active_model_id = "minimax_h3"
+            elif active_model_id == "minimax_h3" and "minimax_h3_ref2va" in LOADED_RUNTIMES:
+                active_model_id = "minimax_h3_ref2va"
+
         rt = LOADED_RUNTIMES.get(active_model_id)
         active_pipe = rt.get("pipeline") if rt else (PIPELINE if LOADED_MODEL_ID == active_model_id else None)
         if active_pipe is None:
@@ -7994,20 +8113,38 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
 
         first_img = decode_base64_image(req.first_frame_base64)
         last_img = decode_base64_image(req.last_frame_base64)
+        extra_ref_imgs: List[Image.Image] = []
+        if req.ref_images_base64:
+            for b64_item in req.ref_images_base64:
+                decoded_im = decode_base64_image(b64_item)
+                if decoded_im is not None:
+                    extra_ref_imgs.append(decoded_im)
 
         keyframes = []
         keyframe_indices = []
-        if pipeline_arch == "minimax_h3" and req.task_mode == "fl2va":
-            if first_img is not None:
-                keyframes.append(first_img)
-                keyframe_indices.append(0)
-            if last_img is not None:
-                keyframes.append(last_img)
-                keyframe_indices.append(-1)
-            if not keyframes:
-                JOBS[job_id]["status"] = "failed"
-                JOBS[job_id]["message"] = "首尾帧模式下请至少提供首帧或尾帧图片"
-                return
+        references = []
+        if pipeline_arch in ("minimax_h3", "minimax_h3_ref2va"):
+            if req.task_mode == "fl2va":
+                if first_img is not None:
+                    keyframes.append(first_img)
+                    keyframe_indices.append(0)
+                if last_img is not None:
+                    keyframes.append(last_img)
+                    keyframe_indices.append(-1)
+                if not keyframes:
+                    JOBS[job_id]["status"] = "failed"
+                    JOBS[job_id]["message"] = "首尾帧模式下请至少提供首帧或尾帧图片"
+                    return
+            elif req.task_mode == "ref2va" or (pipeline_arch == "minimax_h3_ref2va" and (first_img is not None or last_img is not None or extra_ref_imgs)):
+                ref_imgs_list: List[Image.Image] = []
+                for candidate_im in [first_img, last_img] + extra_ref_imgs:
+                    if candidate_im is not None:
+                        ref_imgs_list.append(candidate_im)
+                references = [{"type": "image", "image": im} for im in ref_imgs_list]
+                if req.task_mode == "ref2va" and not references:
+                    JOBS[job_id]["status"] = "failed"
+                    JOBS[job_id]["message"] = "主体参考图生视频 (Ref2VA) 模式下请至少提供一张参考图片（提示词中可用 <Picture 1>、<Picture 2> 引用）"
+                    return
         elif modality == "image" and req.task_mode == "i2i_edit" and first_img is None and last_img is None:
             JOBS[job_id]["status"] = "failed"
             JOBS[job_id]["message"] = "图像编辑/重绘模式下请至少拖入一张输入图片"
@@ -8071,7 +8208,7 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
                     model_name=spec["name"],
                     media_type=media_type,
                 ) as step_progress_bar:
-                    if pipeline_arch == "minimax_h3":
+                    if pipeline_arch in ("minimax_h3", "minimax_h3_ref2va"):
                         from diffsynth.utils.data.audio_video import write_video_audio
                         full_prompt = build_structured_prompt(
                             req.visual_prompt, req.soundscape_prompt, req.music_prompt
@@ -8090,6 +8227,8 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
                         if keyframes:
                             call_kwargs["keyframes"] = keyframes
                             call_kwargs["keyframe_indices"] = keyframe_indices
+                        elif references:
+                            call_kwargs["references"] = references
                         video, audio = _run_pipeline_with_smart_tiling(active_pipe, call_kwargs)
                         if job_cancel_event.is_set() or ABORT_GENERATION_EVENT.is_set():
                             raise GenerationAbortedError("已手动停止当前推理任务")
@@ -10348,17 +10487,24 @@ def create_ui() -> gr.Blocks:
                         t2va_desc_md = gr.Markdown("输入画面描述与声音细节，同步生成高清视频与 **32kHz 立体声音轨**。")
 
                     with gr.TabItem("🖼️ 首尾帧生音视频 / FL2VA", id="fl2va") as tab_fl2va:
-                        with gr.Row():
-                            first_frame_input = gr.Image(
-                                label="📌 首帧图片 (First Frame - index 0)",
-                                type="pil",
-                                height=220,
-                            )
-                            last_frame_input = gr.Image(
-                                label="🏁 尾帧图片 (Last Frame - index -1，可选)",
-                                type="pil",
-                                height=220,
-                            )
+                        fl2va_desc_md = gr.Markdown("在下方图像区上传 **首帧** 和/或 **尾帧** 图片，按关键帧锚点生成过渡视频与立体声。")
+
+                    with gr.TabItem("🎭 主体参考图生音视频 / Ref2VA", id="ref2va") as tab_ref2va:
+                        ref2va_desc_md = gr.Markdown(
+                            "在下方图像区上传 **1~2 张角色/主体/场景参考图**，并在提示词中使用 `<Picture 1>`、`<Picture 2>` 引用对应主体（推荐搭配 `MiniMax-H3-Ref2VA` 权重）。"
+                        )
+
+                with gr.Row():
+                    first_frame_input = gr.Image(
+                        label="📌 首帧图片 / 参考图 1 (<Picture 1>)",
+                        type="pil",
+                        height=220,
+                    )
+                    last_frame_input = gr.Image(
+                        label="🏁 尾帧图片 / 参考图 2 (<Picture 2>，可选)",
+                        type="pil",
+                        height=220,
+                    )
 
                 with gr.Group():
                     visual_prompt_input = gr.Textbox(
@@ -10530,6 +10676,7 @@ def create_ui() -> gr.Blocks:
 
         tab_t2va.select(fn=lambda: "t2va", inputs=None, outputs=task_mode_state)
         tab_fl2va.select(fn=lambda: "fl2va", inputs=None, outputs=task_mode_state)
+        tab_ref2va.select(fn=lambda: "ref2va", inputs=None, outputs=task_mode_state)
 
         refresh_gpu_btn.click(fn=get_gpu_and_model_summary_text, inputs=None, outputs=gpu_status_text)
 

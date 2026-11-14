@@ -445,16 +445,20 @@ struct CreateTabView: View {
                 }
 
                 // Reference Keyframe / Edit Photo Pickers
-                if ["fl2va", "i2i_edit"].contains(vm.taskModeId) {
+                if ["fl2va", "ref2va", "i2i_edit"].contains(vm.taskModeId) {
                     HStack(spacing: 10) {
                         photoSlotView(
-                            title: vm.taskModeId == "fl2va" ? L("首帧参考图", "Start Frame") : L("参考原图 1", "Source Photo 1"),
+                            title: vm.taskModeId == "fl2va"
+                                ? L("首帧参考图", "Start Frame")
+                                : (vm.taskModeId == "ref2va" ? L("参考图 1 (<Picture 1>)", "Ref 1 (<Picture 1>)") : L("参考原图 1", "Source Photo 1")),
                             image: vm.firstFrameImage,
                             selection: $firstPickerItem,
                             onClear: { vm.firstFrameImage = nil; firstPickerItem = nil }
                         )
                         photoSlotView(
-                            title: vm.taskModeId == "fl2va" ? L("尾帧参考图 (可选)", "End Frame (Opt)") : L("融合参考图 2 (可选)", "Photo 2 (Opt)"),
+                            title: vm.taskModeId == "fl2va"
+                                ? L("尾帧参考图 (可选)", "End Frame (Opt)")
+                                : (vm.taskModeId == "ref2va" ? L("参考图 2 (<Picture 2>)", "Ref 2 (<Picture 2>)") : L("融合参考图 2 (可选)", "Photo 2 (Opt)")),
                             image: vm.lastFrameImage,
                             selection: $lastPickerItem,
                             onClear: { vm.lastFrameImage = nil; lastPickerItem = nil }

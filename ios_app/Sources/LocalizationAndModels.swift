@@ -487,6 +487,14 @@ let OPEN_MODEL_CATALOG: [OpenModelSpec] = [
                 subtitleZh: "从相册选首帧/尾帧参考图，精准锁定起止构图与运镜过渡",
                 subtitleEn: "Pick start/end keyframes from Photos to control camera transitions",
                 icon: "photo.on.rectangle.angled"
+            ),
+            TaskModeItem(
+                id: "ref2va",
+                titleZh: "主体参考图生视频",
+                titleEn: "Ref Images to Video",
+                subtitleZh: "选 1~2 张角色/场景参考图（可用 <Picture 1> / <Picture 2> 指代）保持主体一致",
+                subtitleEn: "Pick 1–2 subject/scene references (refer via <Picture 1> / <Picture 2>)",
+                icon: "person.2.crop.square.stack"
             )
         ],
         defaultFiles: (1...13).map { ModelFileItem(name: String(format: "FL2VA/transformer/model-%05d-of-00013.safetensors", $0), desc: "DiT 音视频主干 BF16 \($0)/13", exists: false, size_gb: 0) }

@@ -37,12 +37,13 @@ def _load_app_helpers():
     ]
     mod = ast.Module(body=selected, type_ignores=[])
     ast.fix_missing_locations(mod)
+    from typing import Optional, Tuple
     ns = {
         "os": os,
         "socket": socket,
         "shutil": mock.MagicMock(),
-        "Optional": object,
-        "Tuple": tuple,
+        "Optional": Optional,
+        "Tuple": Tuple,
         "LOADED_RUNTIMES": {},
         "_get_system_ram_gb": lambda: (0.0, 0.0),
     }
@@ -345,6 +346,7 @@ def _load_minimax_h3_image_helpers(tmp_root: str):
     tree = ast.parse(source, filename=APP_PY_PATH)
     wanted_assigns = {
         "MINIMAX_H3_BF16_FILES",
+        "MINIMAX_H3_REF2VA_BF16_FILES",
         "MODEL_CATALOG",
         "MINIMAX_H3_IMAGE_FILES",
         "BUILTIN_MODEL_IDS",
@@ -359,6 +361,7 @@ def _load_minimax_h3_image_helpers(tmp_root: str):
         "_find_existing_model_file",
         "prepare_minimax_h3_image_assembled_dir",
         "run_minimax_h3_image_inference",
+        "_run_pipeline_with_smart_tiling",
     }
     selected = []
     for node in tree.body:
@@ -539,6 +542,90 @@ class MiniMaxH3ImageEngineTest(unittest.TestCase):
             self.assertNotIn("num_inference_steps", first_kw)
             self.assertNotIn("guidance_scale", first_kw)
             self.assertNotIn("negative_prompt", first_kw)
+
+    def test_ref2va_catalog_and_three_way_zero_copy_weight_sharing(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ns, _ = _load_minimax_h3_image_helpers(tmp)
+            ref_spec = ns["MODEL_CATALOG"]["minimax_h3_ref2va"]
+            ref_files = [fn for fn, _ in ref_spec["files"]]
+            self.assertEqual(len(ref_files), 29)
+            self.assertIn("Ref2VA/transformer/model-00001-of-00013.safetensors", ref_files)
+            self.assertIn("Ref2VA/text_encoder/model-00001-of-00014.safetensors", ref_files)
+            self.assertIn("Ref2VA/video_vae/source/model.safetensors", ref_files)
+            self.assertIn("Ref2VA/audio_vae/model.safetensors", ref_files)
+
+            resolved_ref = ns["inspect_and_resolve_hf_repo"]("MiniMaxAI/MiniMax-H3", "Ref2VA/*")
+            self.assertEqual(resolved_ref["pipeline_arch"], "minimax_h3_ref2va")
+            self.assertEqual(len(resolved_ref["files"]), 29)
+
+            with mock.patch("os.getcwd", return_value=tmp):
+                h3_drive = os.path.join(tmp, "drive_models", "MiniMaxAI/MiniMax-H3")
+                for rel in (
+                    "FL2VA/text_encoder/model-00001-of-00014.safetensors",
+                    "FL2VA/video_vae/source/model.safetensors",
+                    "FL2VA/audio_vae/model.safetensors",
+                ):
+                    p = os.path.join(h3_drive, rel)
+                    os.makedirs(os.path.dirname(p), exist_ok=True)
+                    with open(p, "wb") as wf:
+                        wf.write(b"S" * (80 * 1024))
+
+                # MiniMax-H3-Ref2VA should zero-copy share FL2VA's text_encoder, video_vae, and audio_vae
+                te_hit = ns["_find_existing_model_file"](
+                    "minimax_h3_ref2va", "Ref2VA/text_encoder/model-00001-of-00014.safetensors"
+                )
+                vvae_hit = ns["_find_existing_model_file"](
+                    "minimax_h3_ref2va", "Ref2VA/video_vae/source/model.safetensors"
+                )
+                avae_hit = ns["_find_existing_model_file"](
+                    "minimax_h3_ref2va", "Ref2VA/audio_vae/model.safetensors"
+                )
+                self.assertIsNotNone(te_hit)
+                self.assertIn("FL2VA/text_encoder", te_hit)
+                self.assertIsNotNone(vvae_hit)
+                self.assertIn("FL2VA/video_vae", vvae_hit)
+                self.assertIsNotNone(avae_hit)
+                self.assertIn("FL2VA/audio_vae", avae_hit)
+
+    def test_ref2va_pipeline_passes_references_and_falls_back_cleanly(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ns, _ = _load_minimax_h3_image_helpers(tmp)
+            recorded = []
+
+            class _ModernPipe:
+                def __call__(self, **kw):
+                    recorded.append(kw)
+                    return ("VIDEO_FRAMES", "AUDIO_WAVE")
+
+            refs = [{"type": "image", "image": "IMG_1"}, {"type": "image", "image": "IMG_2"}]
+            out = ns["_run_pipeline_with_smart_tiling"](
+                _ModernPipe(),
+                {"prompt": "<Picture 1> and <Picture 2> walking", "references": refs, "height": 480, "width": 832},
+            )
+            self.assertEqual(out, ("VIDEO_FRAMES", "AUDIO_WAVE"))
+            self.assertEqual(recorded[-1]["references"], refs)
+
+            # Verify fallback if an older DiffSynth version raises TypeError on `references`
+            legacy_recorded = []
+
+            class _LegacyPipe:
+                def __call__(self, **kw):
+                    if "references" in kw:
+                        raise TypeError("__call__() got an unexpected keyword argument 'references'")
+                    legacy_recorded.append(kw)
+                    return ("LEGACY_VID", "LEGACY_AUD")
+
+            out2 = ns["_run_pipeline_with_smart_tiling"](
+                _LegacyPipe(),
+                {"prompt": "<Picture 1> walking", "references": refs, "height": 480, "width": 832},
+            )
+            self.assertEqual(out2, ("LEGACY_VID", "LEGACY_AUD"))
+            self.assertEqual(legacy_recorded[-1]["keyframes"], ["IMG_1", "IMG_2"])
+            self.assertEqual(legacy_recorded[-1]["keyframe_indices"], [0, -1])
 
 
 if __name__ == "__main__":

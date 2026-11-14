@@ -1191,6 +1191,13 @@ class EasyColabViewModel(ViewModelServicesMixin, QObject):
             )
             self.state_changed.emit()
             return
+        if self.task_mode_id == "ref2va" and not first_frame_b64 and not last_frame_b64:
+            self.status_message = tr(
+                "「主体参考图生视频 (Ref2VA)」模式请至少上传一张角色或场景参考图（提示词中可用 <Picture 1> 引用）。",
+                "Reference-to-Video (Ref2VA) mode requires at least one reference image (refer via <Picture 1> in prompt).",
+            )
+            self.state_changed.emit()
+            return
         if self.task_mode_id == "i2i_edit" and not first_frame_b64 and not last_frame_b64:
             self.status_message = tr(
                 "指令修图/重绘模式请至少上传一张参考原图。",
@@ -1269,7 +1276,7 @@ class EasyColabViewModel(ViewModelServicesMixin, QObject):
         }
         if chat_messages_payload is not None:
             payload["chat_messages"] = chat_messages_payload
-        if self.task_mode_id in {"fl2va", "i2v", "i2i_edit", "vlm"}:
+        if self.task_mode_id in {"fl2va", "ref2va", "i2v", "i2i_edit", "vlm"}:
             if first_frame_b64:
                 payload["first_frame_base64"] = first_frame_b64
             if last_frame_b64:

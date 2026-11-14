@@ -181,6 +181,14 @@ let OPEN_MODEL_CATALOG: [OpenModelSpec] = [
                 subtitleZh: "上传首帧或尾帧参考图，精准控制起止画面与运镜过渡",
                 subtitleEn: "Upload start or end keyframes to lock composition and camera transitions",
                 icon: "photo.on.rectangle.angled"
+            ),
+            TaskModeItem(
+                id: "ref2va",
+                titleZh: "主体参考图生视频",
+                titleEn: "Reference Images to Video+Audio",
+                subtitleZh: "上传 1~2 张角色/场景参考图（可用 <Picture 1> / <Picture 2> 指代），保持主体一致性生视频",
+                subtitleEn: "Upload 1–2 subject/scene references (refer via <Picture 1> / <Picture 2>) for identity-consistent video",
+                icon: "person.2.crop.square.stack"
             )
         ],
         defaultFiles: (1...13).map { i in
@@ -200,6 +208,56 @@ let OPEN_MODEL_CATALOG: [OpenModelSpec] = [
         } + [
             ModelFileItem(name: "FL2VA/video_vae/source/model.safetensors", desc: "3D 视频 VAE BF16 (9.7 GB)", exists: false, size_gb: 0),
             ModelFileItem(name: "FL2VA/audio_vae/model.safetensors", desc: "32kHz 立体声 VAE BF16 (0.6 GB)", exists: false, size_gb: 0)
+        ]
+    ),
+    OpenModelSpec(
+        id: "minimax_h3_ref2va",
+        nameZh: "MiniMax-H3-Ref2VA (33B · 多参考图)",
+        nameEn: "MiniMax-H3-Ref2VA (33B · Ref2VA)",
+        repoId: "MiniMaxAI/MiniMax-H3",
+        badgeZh: "多图主体一致 · 134 GB (共享省72G)",
+        badgeEn: "Subject Ref2VA · 134 GB (Shares 72G)",
+        summaryZh: "MiniMax-H3 官方 Ref2VA 主体参考图生音视频分支（自动零拷贝共享 72.4GB 编码器与音视频 VAE，仅增量下载 61.7GB DiT）",
+        summaryEn: "Official MiniMax-H3 Ref2VA multi-reference subject-to-video+audio branch (zero-copy shares 72.4GB encoder & VAEs)",
+        approxSizeGB: 134.1,
+        icon: "person.2.crop.square.stack",
+        modality: .videoAudio,
+        defaultSteps: 35,
+        modes: [
+            TaskModeItem(
+                id: "ref2va",
+                titleZh: "主体参考图生视频",
+                titleEn: "Reference Images to Video+Audio",
+                subtitleZh: "上传 1~2 张角色/场景参考图（可用 <Picture 1> / <Picture 2> 指代），保持主体一致性生视频",
+                subtitleEn: "Upload 1–2 subject/scene references (refer via <Picture 1> / <Picture 2>) for identity-consistent video",
+                icon: "person.2.crop.square.stack"
+            ),
+            TaskModeItem(
+                id: "t2va",
+                titleZh: "文生音视频",
+                titleEn: "Text to Video+Audio",
+                subtitleZh: "输入镜头与声音描述，同步生成视频与立体声音轨",
+                subtitleEn: "Generate HD video and synchronized stereo audio from scene & sound prompts",
+                icon: "film"
+            )
+        ],
+        defaultFiles: (1...13).map { i in
+            ModelFileItem(
+                name: String(format: "Ref2VA/transformer/model-%05d-of-00013.safetensors", i),
+                desc: "Ref2VA 音视频主干 BF16 \(i)/13",
+                exists: false,
+                size_gb: 0
+            )
+        } + (1...14).map { i in
+            ModelFileItem(
+                name: String(format: "Ref2VA/text_encoder/model-%05d-of-00014.safetensors", i),
+                desc: "多模态编码器 BF16 \(i)/14 (共享)",
+                exists: false,
+                size_gb: 0
+            )
+        } + [
+            ModelFileItem(name: "Ref2VA/video_vae/source/model.safetensors", desc: "3D 视频 VAE BF16 (9.7 GB · 共享)", exists: false, size_gb: 0),
+            ModelFileItem(name: "Ref2VA/audio_vae/model.safetensors", desc: "32kHz 立体声 VAE BF16 (0.6 GB · 共享)", exists: false, size_gb: 0)
         ]
     ),
     OpenModelSpec(

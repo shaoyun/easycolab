@@ -271,7 +271,8 @@ val OPEN_MODEL_CATALOG: List<OpenModelSpec> = listOf(
         defaultSteps = 35f,
         modes = listOf(
             TaskModeItem("t2va", "文生音视频", "Text to Video+Audio", "输入镜头与声音描述，一次生成视频与立体声音轨", "Generate HD video & stereo audio from visual and sound prompts"),
-            TaskModeItem("fl2va", "首尾帧生视频", "Keyframes to Video", "从相册选择首帧/尾帧参考图，精准锁定起止画面与运镜", "Pick start/end keyframes from Gallery to control motion")
+            TaskModeItem("fl2va", "首尾帧生视频", "Keyframes to Video", "从相册选择首帧/尾帧参考图，精准锁定起止画面与运镜", "Pick start/end keyframes from Gallery to control motion"),
+            TaskModeItem("ref2va", "主体参考图生视频", "Ref Images to Video", "选 1~2 张角色/场景参考图（可用 <Picture 1> 指代）保持主体一致", "Pick 1–2 subject/scene references (refer via <Picture 1>)")
         ),
         defaultFiles = (1..13).map { ModelFileItem(String.format(Locale.US, "FL2VA/transformer/model-%05d-of-00013.safetensors", it), "DiT 音视频主干 BF16 $it/13") } +
             (1..14).map { ModelFileItem(String.format(Locale.US, "FL2VA/text_encoder/model-%05d-of-00014.safetensors", it), "多模态编码器 BF16 $it/14") } +

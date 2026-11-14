@@ -960,7 +960,7 @@ final class IOSStudioViewModel: ObservableObject {
             statusMessage = L("请先输入提示词或对话内容！", "Please enter a prompt first!")
             return
         }
-        if (taskModeId == "fl2va" || taskModeId == "i2i_edit") && firstFrameImage == nil && lastFrameImage == nil {
+        if (taskModeId == "fl2va" || taskModeId == "ref2va" || taskModeId == "i2i_edit") && firstFrameImage == nil && lastFrameImage == nil {
             statusMessage = L("请先从手机相册选择至少 1 张参考图片。", "Please select at least 1 reference photo first.")
             return
         }
@@ -1046,7 +1046,7 @@ final class IOSStudioViewModel: ObservableObject {
                 "reasoning_effort": reasoningEffort
             ]
             if !chatPayload.isEmpty { payload["chat_messages"] = chatPayload }
-            if ["fl2va", "i2v", "i2i_edit", "vlm"].contains(taskModeId) {
+            if ["fl2va", "ref2va", "i2v", "i2i_edit", "vlm"].contains(taskModeId) {
                 if let img1 = firstFrameImage, let jpg = img1.jpegData(compressionQuality: 0.90) {
                     payload["first_frame_base64"] = jpg.base64EncodedString()
                 }
