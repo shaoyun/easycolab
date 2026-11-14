@@ -172,6 +172,8 @@ final class IOSStudioViewModel: ObservableObject {
     @Published var musicPrompt: String = PRESET_TEMPLATES[0].music
     @Published var firstFrameImage: UIImage? = nil
     @Published var lastFrameImage: UIImage? = nil
+    @Published var ref2vaImages: [UIImage] = []
+    @Published var ref2vaVideosData: [Data] = []
     @Published var selectedVideoResolution: ResolutionOption = VIDEO_RESOLUTIONS[0]
     @Published var selectedImageResolution: ResolutionOption = IMAGE_RESOLUTIONS[0]
     @Published var numFrames: Double = 124
@@ -960,8 +962,12 @@ final class IOSStudioViewModel: ObservableObject {
             statusMessage = L("请先输入提示词或对话内容！", "Please enter a prompt first!")
             return
         }
-        if (taskModeId == "fl2va" || taskModeId == "ref2va" || taskModeId == "i2i_edit") && firstFrameImage == nil && lastFrameImage == nil {
+        if (taskModeId == "fl2va" || taskModeId == "i2i_edit") && firstFrameImage == nil && lastFrameImage == nil {
             statusMessage = L("请先从手机相册选择至少 1 张参考图片。", "Please select at least 1 reference photo first.")
+            return
+        }
+        if taskModeId == "ref2va" && firstFrameImage == nil && lastFrameImage == nil && ref2vaImages.isEmpty && ref2vaVideosData.isEmpty {
+            statusMessage = L("请先选择至少 1 张参考图片（最多 9 张）或 1 段参考视频（最多 3 段）。", "Please select at least 1 reference photo (up to 9) or 1 reference video (up to 3).")
             return
         }
         if !hasAcceptedCloudAIConsent {
@@ -1052,6 +1058,17 @@ final class IOSStudioViewModel: ObservableObject {
                 }
                 if let img2 = lastFrameImage, let jpg = img2.jpegData(compressionQuality: 0.90) {
                     payload["last_frame_base64"] = jpg.base64EncodedString()
+                }
+                if taskModeId == "ref2va" {
+                    let allImgs = ([firstFrameImage, lastFrameImage].compactMap { $0 } + ref2vaImages).prefix(9)
+                    let imgsB64 = allImgs.compactMap { $0.jpegData(compressionQuality: 0.90)?.base64EncodedString() }
+                    if !imgsB64.isEmpty {
+                        payload["ref_images_base64"] = imgsB64
+                    }
+                    let vidsB64 = ref2vaVideosData.prefix(3).map { $0.base64EncodedString() }
+                    if !vidsB64.isEmpty {
+                        payload["ref_videos_base64"] = vidsB64
+                    }
                 }
             }
 

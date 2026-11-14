@@ -1172,6 +1172,8 @@ class EasyColabViewModel(ViewModelServicesMixin, QObject):
         self,
         first_frame_b64: Optional[str] = None,
         last_frame_b64: Optional[str] = None,
+        ref_images_b64: Optional[List[str]] = None,
+        ref_videos_b64: Optional[List[str]] = None,
     ) -> None:
         if self.is_generating:
             return
@@ -1191,10 +1193,10 @@ class EasyColabViewModel(ViewModelServicesMixin, QObject):
             )
             self.state_changed.emit()
             return
-        if self.task_mode_id == "ref2va" and not first_frame_b64 and not last_frame_b64:
+        if self.task_mode_id == "ref2va" and not first_frame_b64 and not last_frame_b64 and not ref_images_b64 and not ref_videos_b64:
             self.status_message = tr(
-                "「主体参考图生视频 (Ref2VA)」模式请至少上传一张角色或场景参考图（提示词中可用 <Picture 1> 引用）。",
-                "Reference-to-Video (Ref2VA) mode requires at least one reference image (refer via <Picture 1> in prompt).",
+                "「多模态参考生视频 (Ref2VA)」模式请至少添加 1 张参考图（最多 9 张 <Picture 1>~<Picture 9>）或 1 段参考视频（最多 3 段 <Video 1>~<Video 3>）。",
+                "Reference-to-Video (Ref2VA) mode requires at least 1 reference image (up to 9: <Picture 1>–<Picture 9>) or 1 reference video (up to 3: <Video 1>–<Video 3>).",
             )
             self.state_changed.emit()
             return
@@ -1281,6 +1283,11 @@ class EasyColabViewModel(ViewModelServicesMixin, QObject):
                 payload["first_frame_base64"] = first_frame_b64
             if last_frame_b64:
                 payload["last_frame_base64"] = last_frame_b64
+            if self.task_mode_id == "ref2va":
+                if ref_images_b64:
+                    payload["ref_images_base64"] = list(ref_images_b64)[:9]
+                if ref_videos_b64:
+                    payload["ref_videos_base64"] = list(ref_videos_b64)[:3]
 
         self.status_message = tr(
             f"正在向云端提交 {spec.name} 推理任务...",

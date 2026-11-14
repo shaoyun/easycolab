@@ -1134,25 +1134,14 @@ extension MainStudioView {
             }
         case "ref2va":
             WorkspaceCard(
-                title: L("主体 / 角色参考图 (Ref2VA)", "Subject / Character Reference Images (Ref2VA)"),
+                title: L("多模态参考资产工作台 (Ref2VA · 最多 9 张参考图 + 3 段参考视频)", "Multimodal Reference Assets (Ref2VA · Up to 9 Images + 3 Videos)"),
                 subtitle: L(
-                    "上传 1~2 张角色、主体或场景参考图，并在画面提示词中使用 <Picture 1>、<Picture 2> 指代对应主体",
-                    "Drop 1–2 character, subject, or scene references and refer to them as <Picture 1>, <Picture 2> in your prompt"
+                    "按 MiniMax-H3 Ref2VA 官方模型上限设计：支持上传最多 9 张角色/主体/场景参考图（用 <Picture 1>~<Picture 9> 引用）与最多 3 段动作/运镜参考视频（用 <Video 1>~<Video 3> 引用），总资产上限 12 个",
+                    "Official MiniMax-H3 Ref2VA capacity: up to 9 character/subject/scene images (<Picture 1>–<Picture 9>) and up to 3 motion/camera videos (<Video 1>–<Video 3>), up to 12 assets total"
                 ),
                 icon: "person.2.crop.square.stack"
             ) {
-                HStack(spacing: 12) {
-                    FrameDropWell(
-                        title: L("参考图 1 (<Picture 1> · 必选)", "Reference 1 (<Picture 1> · Required)"),
-                        subtitle: L("拖入主体/角色参考图 1", "Drop subject/character reference 1"),
-                        image: $vm.firstFrameImage
-                    )
-                    FrameDropWell(
-                        title: L("参考图 2 (<Picture 2> · 可选)", "Reference 2 (<Picture 2> · Optional)"),
-                        subtitle: L("拖入第二张主体或场景参考图", "Drop second subject or scene reference"),
-                        image: $vm.lastFrameImage
-                    )
-                }
+                Ref2VAMultiReferencePanel(vm: vm)
             }
         case "i2v":
             WorkspaceCard(

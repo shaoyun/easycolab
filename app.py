@@ -1403,11 +1403,11 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "minimax_h3_ref2va": {
         "id": "minimax_h3_ref2va",
-        "name": "MiniMax-H3-Ref2VA (33B · 多参考图)",
+        "name": "MiniMax-H3-Ref2VA (33B · 多参考图/视频)",
         "repo_id": "MiniMaxAI/MiniMax-H3",
         "modality": "video_audio",
         "pipeline_arch": "minimax_h3_ref2va",
-        "category": "多主体参考图生有声视频 (Ref2VA) · 零拷贝共享 72.4GB 编码器与双 VAE",
+        "category": "多主体参考音视频 (Ref2VA · 最多9张参考图+3段参考视频) · 零拷贝共享 72.4GB 编码器与双 VAE",
         "approx_size_gb": 134.1,
         "files": MINIMAX_H3_REF2VA_BF16_FILES,
     },
@@ -5566,6 +5566,13 @@ def _run_pipeline_with_smart_tiling(pipe, call_kwargs: dict):
             if "references" in kw and "unexpected keyword argument" in str(te):
                 refs = kw.get("references") or []
                 imgs = [r.get("image") for r in refs if isinstance(r, dict) and r.get("image") is not None]
+                if not imgs:
+                    for r in refs:
+                        if isinstance(r, dict) and isinstance(r.get("video"), list) and r["video"]:
+                            imgs.append(r["video"][0])
+                            if len(r["video"]) > 1:
+                                imgs.append(r["video"][-1])
+                            break
                 fb_kw = {k: v for k, v in kw.items() if k != "references"}
                 if imgs:
                     fb_kw["keyframes"] = imgs[:2]
@@ -5610,8 +5617,256 @@ def _run_pipeline_with_smart_tiling(pipe, call_kwargs: dict):
 
 
 # ==============================================================================
-# 视频生成核心函数
 # ==============================================================================
+# 视频生成核心函数与 MiniMax-H3 Ref2VA 多模态参考规范
+# 官方上限：最多 9 张参考图 (<Picture 1>~<Picture 9>) + 最多 3 段参考视频 (<Video 1>~<Video 3>)
+#         + 最多 3 段参考音频 (<Audio 1>~<Audio 3>)，单次总参考模态资产上限 12 个
+# ==============================================================================
+MAX_REF2VA_IMAGES = 9
+MAX_REF2VA_VIDEOS = 3
+MAX_REF2VA_AUDIOS = 3
+MAX_REF2VA_TOTAL_ASSETS = 12
+
+
+def _align_minimax_h3_frame_count(frame_count: int) -> int:
+    """将帧数向上对齐至 MiniMax-H3 DiT 要求的 17k + 5 时间网格 (如 5, 22, 39, 56, 73, 90, 107, 124)"""
+    current = max(int(frame_count), 5)
+    while current % 17 != 5:
+        current += 1
+    return current
+
+
+def load_reference_video_frames(
+    video_source: Any,
+    width: int = 832,
+    height: int = 480,
+    target_fps: int = 24,
+    max_frames: int = 124,
+) -> Optional[List[Image.Image]]:
+    """
+    将参考视频（文件路径、base64 字符串、字节流或已解码帧列表）重采样至 24fps 并对齐到 17k+5 帧数网格，
+    返回 RGB PIL.Image 列表供 MiniMaxH3Pipeline references=[{"type": "video", "video": frames}] 使用。
+    """
+    if video_source is None:
+        return None
+
+    # 1. 若已是帧列表 (如单元测试传入或预处理完成的 PIL.Image 列表)
+    if isinstance(video_source, (list, tuple)):
+        raw_frames = list(video_source)
+        if not raw_frames:
+            return None
+        num_out = min(max_frames, _align_minimax_h3_frame_count(len(raw_frames)))
+        out_list: List[Image.Image] = []
+        for idx in range(num_out):
+            frm = raw_frames[min(idx, len(raw_frames) - 1)]
+            if isinstance(frm, Image.Image):
+                im = frm.convert("RGB")
+                if im.size != (width, height):
+                    im = im.resize((width, height))
+                out_list.append(im)
+        return out_list if out_list else None
+
+    # 2. 解析文件路径或 base64 / bytes 临时文件
+    temp_video_path: Optional[str] = None
+    video_path: Optional[str] = None
+    try:
+        if isinstance(video_source, str):
+            s_val = video_source.strip()
+            if not s_val:
+                return None
+            if os.path.isfile(s_val):
+                video_path = s_val
+            else:
+                if "," in s_val and s_val.split(",", 1)[0].lower().startswith("data:"):
+                    s_val = s_val.split(",", 1)[1]
+                raw_bytes = base64.b64decode(s_val)
+                fd, temp_video_path = tempfile.mkstemp(suffix=".mp4", prefix="easycolab_refvid_")
+                with os.fdopen(fd, "wb") as tf:
+                    tf.write(raw_bytes)
+                video_path = temp_video_path
+        elif isinstance(video_source, (bytes, bytearray)):
+            fd, temp_video_path = tempfile.mkstemp(suffix=".mp4", prefix="easycolab_refvid_")
+            with os.fdopen(fd, "wb") as tf:
+                tf.write(bytes(video_source))
+            video_path = temp_video_path
+        elif hasattr(video_source, "name") and isinstance(getattr(video_source, "name"), str) and os.path.isfile(video_source.name):
+            video_path = video_source.name
+
+        if not video_path or not os.path.isfile(video_path):
+            return None
+
+        raw_frames_loaded: List[Image.Image] = []
+        src_fps = float(target_fps)
+
+        # 优先使用 DiffSynth 官方 VideoData 读取器
+        try:
+            from diffsynth.utils.data import VideoData
+            vd = VideoData(video_path, height=height, width=width)
+            raw_frames_loaded = [
+                (f.convert("RGB") if isinstance(f, Image.Image) else Image.fromarray(f).convert("RGB"))
+                for f in vd.raw_data()
+            ]
+            meta_fps = vd.data.reader.get_meta_data().get("fps")
+            if meta_fps and float(meta_fps) > 0:
+                src_fps = float(meta_fps)
+        except Exception:
+            pass
+
+        # 回退方案 1: PyAV (av)
+        if not raw_frames_loaded:
+            try:
+                import av
+                with av.open(video_path) as container:
+                    if container.streams.video:
+                        vstream = container.streams.video[0]
+                        if vstream.average_rate:
+                            src_fps = float(vstream.average_rate)
+                        for packet_frame in container.decode(vstream):
+                            pil_f = packet_frame.to_image().convert("RGB")
+                            if pil_f.size != (width, height):
+                                pil_f = pil_f.resize((width, height))
+                            raw_frames_loaded.append(pil_f)
+                            if len(raw_frames_loaded) >= max_frames * 3:
+                                break
+            except Exception:
+                pass
+
+        # 回退方案 2: imageio
+        if not raw_frames_loaded:
+            try:
+                import imageio
+                reader = imageio.get_reader(video_path)
+                try:
+                    meta = reader.get_meta_data()
+                    if meta and meta.get("fps"):
+                        src_fps = float(meta["fps"])
+                except Exception:
+                    pass
+                for arr in reader:
+                    pil_f = Image.fromarray(arr).convert("RGB")
+                    if pil_f.size != (width, height):
+                        pil_f = pil_f.resize((width, height))
+                    raw_frames_loaded.append(pil_f)
+                    if len(raw_frames_loaded) >= max_frames * 3:
+                        break
+                reader.close()
+            except Exception:
+                pass
+
+        if not raw_frames_loaded:
+            return None
+
+        est_target_count = max(1, int(round(len(raw_frames_loaded) * float(target_fps) / max(1.0, src_fps))))
+        num_out_frames = min(int(max_frames), _align_minimax_h3_frame_count(est_target_count))
+        resampled: List[Image.Image] = []
+        for k in range(num_out_frames):
+            idx = int(round(k * src_fps / float(target_fps)))
+            if idx >= len(raw_frames_loaded):
+                idx = len(raw_frames_loaded) - 1
+            frm = raw_frames_loaded[idx]
+            if frm.size != (width, height):
+                frm = frm.resize((width, height))
+            resampled.append(frm)
+        return resampled if resampled else None
+    except Exception as e:
+        print(f"[Ref2VA 视频参考解码提示] 解析参考视频跳过: {e}")
+        return None
+    finally:
+        if temp_video_path and os.path.exists(temp_video_path):
+            try:
+                os.remove(temp_video_path)
+            except Exception:
+                pass
+
+
+def decode_base64_video_frames(
+    b64_str: Optional[str],
+    width: int = 832,
+    height: int = 480,
+    target_fps: int = 24,
+    max_frames: int = 124,
+) -> Optional[List[Image.Image]]:
+    if not b64_str or not str(b64_str).strip():
+        return None
+    return load_reference_video_frames(
+        b64_str,
+        width=width,
+        height=height,
+        target_fps=target_fps,
+        max_frames=max_frames,
+    )
+
+
+def build_minimax_h3_references(
+    ref_images: Optional[Sequence[Any]] = None,
+    ref_videos: Optional[Sequence[Any]] = None,
+    width: int = 832,
+    height: int = 480,
+    fps: int = 24,
+    max_video_frames: int = 124,
+) -> List[Dict[str, Any]]:
+    """
+    按 MiniMax-H3 Ref2VA 官方模型上限构建 references 多模态列表：
+    - 参考图片 (type="image"): 最多 9 张 (<Picture 1> ~ <Picture 9> / <Subject 1> ~ <Subject 9>)
+    - 参考视频 (type="video"): 最多 3 段 (<Video 1> ~ <Video 3>)
+    - 总参考资产上限: 12 个
+    """
+    refs: List[Dict[str, Any]] = []
+
+    if ref_images:
+        img_count = 0
+        for item in ref_images:
+            if img_count >= MAX_REF2VA_IMAGES or len(refs) >= MAX_REF2VA_TOTAL_ASSETS:
+                break
+            if item is None:
+                continue
+            pil_im: Optional[Image.Image] = None
+            if isinstance(item, Image.Image):
+                pil_im = item.convert("RGB")
+            elif isinstance(item, str):
+                s_item = item.strip()
+                if not s_item:
+                    continue
+                if os.path.isfile(s_item):
+                    try:
+                        pil_im = Image.open(s_item).convert("RGB")
+                    except Exception:
+                        pil_im = None
+                else:
+                    try:
+                        pil_im = decode_base64_image(s_item)
+                    except Exception:
+                        pil_im = None
+            elif hasattr(item, "name") and isinstance(getattr(item, "name"), str) and os.path.isfile(item.name):
+                try:
+                    pil_im = Image.open(item.name).convert("RGB")
+                except Exception:
+                    pil_im = None
+            if pil_im is not None:
+                refs.append({"type": "image", "image": pil_im})
+                img_count += 1
+
+    if ref_videos:
+        vid_count = 0
+        for v_item in ref_videos:
+            if vid_count >= MAX_REF2VA_VIDEOS or len(refs) >= MAX_REF2VA_TOTAL_ASSETS:
+                break
+            if v_item is None:
+                continue
+            v_frames = load_reference_video_frames(
+                v_item,
+                width=int(width),
+                height=int(height),
+                target_fps=int(fps),
+                max_frames=int(max_video_frames),
+            )
+            if v_frames:
+                refs.append({"type": "video", "video": v_frames})
+                vid_count += 1
+
+    return refs
+
+
 RESOLUTION_MAP = {
     "832 × 480 (16:9 横屏标准 - 推荐)": (832, 480),
     "480 × 832 (9:16 竖屏短视频)": (480, 832),
@@ -5635,6 +5890,8 @@ def generate_video(
     seed: int,
     randomize_seed: bool,
     save_dir: str,
+    ref_images_files: Optional[List[Any]] = None,
+    ref_videos_files: Optional[List[Any]] = None,
     progress=gr.Progress(track_tqdm=True),
 ) -> Tuple[Optional[str], str, int, List[str]]:
     global PIPELINE
@@ -5675,13 +5932,24 @@ def generate_video(
                 get_history_videos(save_dir),
             )
     elif task_mode == "ref2va":
-        for ref_im in (first_frame_img, last_frame_img):
-            if ref_im is not None:
-                references.append({"type": "image", "image": ref_im.convert("RGB")})
+        candidate_imgs: List[Any] = [im for im in (first_frame_img, last_frame_img) if im is not None]
+        if ref_images_files:
+            candidate_imgs.extend(ref_images_files if isinstance(ref_images_files, list) else [ref_images_files])
+        candidate_vids: List[Any] = []
+        if ref_videos_files:
+            candidate_vids.extend(ref_videos_files if isinstance(ref_videos_files, list) else [ref_videos_files])
+        references = build_minimax_h3_references(
+            ref_images=candidate_imgs[:MAX_REF2VA_IMAGES],
+            ref_videos=candidate_vids[:MAX_REF2VA_VIDEOS],
+            width=width,
+            height=height,
+            fps=int(fps),
+            max_video_frames=int(num_frames),
+        )
         if not references:
             return (
                 None,
-                "⚠️ 在「主体参考图生视频 (Ref2VA)」模式下，请至少上传一张参考图片（提示词中可用 `<Picture 1>`、`<Picture 2>` 引用）！",
+                "⚠️ 在「主体参考生音视频 (Ref2VA)」模式下，请至少上传 1 张参考图片（最多 9 张 `<Picture 1>`~`<Picture 9>`）或 1 段参考视频（最多 3 段 `<Video 1>`~`<Video 3>`）！",
                 seed,
                 get_history_videos(save_dir),
             )
@@ -7633,6 +7901,8 @@ class GenerateVideoRequest(BaseModel):
     first_frame_base64: Optional[str] = None
     last_frame_base64: Optional[str] = None
     ref_images_base64: Optional[List[str]] = None
+    ref_videos_base64: Optional[List[str]] = None
+    ref_audios_base64: Optional[List[str]] = None
     width: int = 832
     height: int = 480
     num_frames: int = 124
@@ -8147,12 +8417,19 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
 
         first_img = decode_base64_image(req.first_frame_base64)
         last_img = decode_base64_image(req.last_frame_base64)
-        extra_ref_imgs: List[Image.Image] = []
-        if req.ref_images_base64:
-            for b64_item in req.ref_images_base64:
-                decoded_im = decode_base64_image(b64_item)
-                if decoded_im is not None:
-                    extra_ref_imgs.append(decoded_im)
+
+        # 按官方上限（最多 9 张参考图 + 最多 3 段参考视频，去重保序）收集 Ref2VA 多模态参考资产
+        raw_ref_img_b64s: List[str] = []
+        explicit_ref_b64s = [s.strip() for s in (req.ref_images_base64 or []) if s and s.strip()]
+        for legacy_b64 in (req.first_frame_base64, req.last_frame_base64):
+            if legacy_b64 and legacy_b64.strip() and legacy_b64.strip() not in explicit_ref_b64s:
+                raw_ref_img_b64s.append(legacy_b64.strip())
+        raw_ref_img_b64s.extend(explicit_ref_b64s)
+        raw_ref_img_b64s = raw_ref_img_b64s[:MAX_REF2VA_IMAGES]
+
+        raw_ref_vid_b64s: List[str] = [
+            v.strip() for v in (req.ref_videos_base64 or []) if v and str(v).strip()
+        ][:MAX_REF2VA_VIDEOS]
 
         keyframes = []
         keyframe_indices = []
@@ -8169,15 +8446,22 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
                     JOBS[job_id]["status"] = "failed"
                     JOBS[job_id]["message"] = "首尾帧模式下请至少提供首帧或尾帧图片"
                     return
-            elif req.task_mode == "ref2va" or (pipeline_arch == "minimax_h3_ref2va" and (first_img is not None or last_img is not None or extra_ref_imgs)):
-                ref_imgs_list: List[Image.Image] = []
-                for candidate_im in [first_img, last_img] + extra_ref_imgs:
-                    if candidate_im is not None:
-                        ref_imgs_list.append(candidate_im)
-                references = [{"type": "image", "image": im} for im in ref_imgs_list]
+            elif req.task_mode == "ref2va" or (
+                pipeline_arch == "minimax_h3_ref2va" and (raw_ref_img_b64s or raw_ref_vid_b64s)
+            ):
+                references = build_minimax_h3_references(
+                    ref_images=raw_ref_img_b64s,
+                    ref_videos=raw_ref_vid_b64s,
+                    width=int(req.width),
+                    height=int(req.height),
+                    fps=int(req.fps),
+                    max_video_frames=int(req.num_frames),
+                )
                 if req.task_mode == "ref2va" and not references:
                     JOBS[job_id]["status"] = "failed"
-                    JOBS[job_id]["message"] = "主体参考图生视频 (Ref2VA) 模式下请至少提供一张参考图片（提示词中可用 <Picture 1>、<Picture 2> 引用）"
+                    JOBS[job_id]["message"] = (
+                        "主体参考生视频 (Ref2VA) 模式下请至少提供 1 张参考图（最多 9 张 <Picture 1>~<Picture 9>）或 1 段参考视频（最多 3 段 <Video 1>~<Video 3>）"
+                    )
                     return
         elif modality == "image" and req.task_mode == "i2i_edit" and first_img is None and last_img is None:
             JOBS[job_id]["status"] = "failed"
@@ -10531,10 +10815,21 @@ def create_ui() -> gr.Blocks:
                     with gr.TabItem("🖼️ 首尾帧生音视频 / FL2VA", id="fl2va") as tab_fl2va:
                         fl2va_desc_md = gr.Markdown("在下方图像区上传 **首帧** 和/或 **尾帧** 图片，按关键帧锚点生成过渡视频与立体声。")
 
-                    with gr.TabItem("🎭 主体参考图生音视频 / Ref2VA", id="ref2va") as tab_ref2va:
+                    with gr.TabItem("🎭 主体参考音视频 / Ref2VA (最多9图+3视频)", id="ref2va") as tab_ref2va:
                         ref2va_desc_md = gr.Markdown(
-                            "在下方图像区上传 **1~2 张角色/主体/场景参考图**，并在提示词中使用 `<Picture 1>`、`<Picture 2>` 引用对应主体（推荐搭配 `MiniMax-H3-Ref2VA` 权重）。"
+                            "支持官方满血多模态参考上限：最多上传 **9 张参考图**（提示词用 `<Picture 1>`~`<Picture 9>` 或 `<Subject 1>`~`<Subject 9>` 引用角色/场景）+ **3 段参考视频**（用 `<Video 1>`~`<Video 3>` 引用动作/运镜），总参考资产上限 **12 个**（推荐搭配 `MiniMax-H3-Ref2VA` 权重）。"
                         )
+                        with gr.Row():
+                            ref_images_files_input = gr.File(
+                                file_count="multiple",
+                                file_types=["image"],
+                                label="🖼️ 多张主体/场景参考图 (最多 9 张 · 对应 <Picture 1> ~ <Picture 9>)",
+                            )
+                            ref_videos_files_input = gr.File(
+                                file_count="multiple",
+                                file_types=["video"],
+                                label="🎬 动作/运镜参考视频 (最多 3 段 · 对应 <Video 1> ~ <Video 3>)",
+                            )
 
                 with gr.Row():
                     first_frame_input = gr.Image(
@@ -10799,6 +11094,8 @@ def create_ui() -> gr.Blocks:
                 seed_input,
                 randomize_seed_chk,
                 save_dir_input,
+                ref_images_files_input,
+                ref_videos_files_input,
             ],
             outputs=[output_video, run_status_box, seed_input, history_gallery],
         ).then(fn=get_gpu_and_model_summary_text, inputs=None, outputs=gpu_status_text)

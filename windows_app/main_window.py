@@ -9,6 +9,7 @@ Implements 1:1 feature & layout parity with macOS EasyColabStudio.swift:
 """
 from __future__ import annotations
 
+import base64
 import html
 import webbrowser
 from datetime import datetime
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -1273,6 +1275,64 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
         self.vm.status_message = tip
         self.log_status_lbl.setText(tip)
 
+    def _on_pick_ref2va_images(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            tr("选择角色/主体/场景参考图片 (最多 9 张)", "Select Subject/Scene Reference Images (Up to 9)"),
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp)",
+        )
+        for f in files:
+            if len(self.ref2va_image_paths) >= 9:
+                break
+            if f and f not in self.ref2va_image_paths:
+                self.ref2va_image_paths.append(f)
+        self._refresh_ref2va_asset_labels()
+
+    def _on_clear_ref2va_images(self) -> None:
+        self.ref2va_image_paths.clear()
+        self._refresh_ref2va_asset_labels()
+
+    def _on_pick_ref2va_videos(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            tr("选择动作/运镜参考视频 (最多 3 段)", "Select Motion/Camera Reference Videos (Up to 3)"),
+            "",
+            "Videos (*.mp4 *.mov *.webm *.mkv *.avi)",
+        )
+        for f in files:
+            if len(self.ref2va_video_paths) >= 3:
+                break
+            if f and f not in self.ref2va_video_paths:
+                self.ref2va_video_paths.append(f)
+        self._refresh_ref2va_asset_labels()
+
+    def _on_clear_ref2va_videos(self) -> None:
+        self.ref2va_video_paths.clear()
+        self._refresh_ref2va_asset_labels()
+
+    def _refresh_ref2va_asset_labels(self) -> None:
+        if not hasattr(self, "ref2va_img_status_lbl"):
+            return
+        if self.ref2va_image_paths:
+            names = [f"<Picture {i+1}> {Path(p).name}" for i, p in enumerate(self.ref2va_image_paths[:9])]
+            self.ref2va_img_status_lbl.setText(
+                tr(f"参考图片 ({len(self.ref2va_image_paths)}/9)：" + " · ".join(names), f"Ref Images ({len(self.ref2va_image_paths)}/9): " + " · ".join(names))
+            )
+        else:
+            self.ref2va_img_status_lbl.setText(
+                tr("参考图片 (0/9)：尚未添加（或直接使用上方首尾帧槽位）", "Ref Images (0/9): None added")
+            )
+        if self.ref2va_video_paths:
+            vnames = [f"<Video {i+1}> {Path(p).name}" for i, p in enumerate(self.ref2va_video_paths[:3])]
+            self.ref2va_vid_status_lbl.setText(
+                tr(f"参考视频 ({len(self.ref2va_video_paths)}/3)：" + " · ".join(vnames), f"Ref Videos ({len(self.ref2va_video_paths)}/3): " + " · ".join(vnames))
+            )
+        else:
+            self.ref2va_vid_status_lbl.setText(
+                tr("参考视频 (0/3)：尚未添加 (<Video 1> ~ <Video 3>)", "Ref Videos (0/3): None added (<Video 1>–<Video 3>)")
+            )
+
     def _trigger_generate(self) -> None:
         spec = self.vm.active_model_spec
         if spec.modality == ModelModality.COMFY_UI:
@@ -1282,11 +1342,28 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
 
         first_b64: Optional[str] = None
         last_b64: Optional[str] = None
+        ref_imgs_b64: List[str] = []
+        ref_vids_b64: List[str] = []
         if spec.modality in (ModelModality.VIDEO_AUDIO, ModelModality.VIDEO):
             self.vm.visual_prompt = self.vid_visual_edit.toPlainText()
             if self.vm.task_mode_id in ("fl2va", "ref2va"):
                 first_b64 = self.video_first_well.to_jpeg_base64()
                 last_b64 = self.video_last_well.to_jpeg_base64()
+            if self.vm.task_mode_id == "ref2va":
+                for p in getattr(self, "ref2va_image_paths", [])[:9]:
+                    try:
+                        raw_im = Path(p).read_bytes()
+                        if raw_im:
+                            ref_imgs_b64.append(base64.b64encode(raw_im).decode("ascii"))
+                    except Exception:
+                        pass
+                for vp in getattr(self, "ref2va_video_paths", [])[:3]:
+                    try:
+                        raw_vid = Path(vp).read_bytes()
+                        if raw_vid:
+                            ref_vids_b64.append(base64.b64encode(raw_vid).decode("ascii"))
+                    except Exception:
+                        pass
         elif spec.modality == ModelModality.LLM_VLM:
             self.vm.visual_prompt = self.llm_prompt_edit.toPlainText()
             if self.vm.task_mode_id == "vlm":
@@ -1299,7 +1376,12 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
                 if spec.id == "qwen_image_21":
                     last_b64 = self.img_ref2_well.to_jpeg_base64()
 
-        self.vm.start_generation(first_frame_b64=first_b64, last_frame_b64=last_b64)
+        self.vm.start_generation(
+            first_frame_b64=first_b64,
+            last_frame_b64=last_b64,
+            ref_images_b64=ref_imgs_b64 or None,
+            ref_videos_b64=ref_vids_b64 or None,
+        )
         if spec.modality == ModelModality.LLM_VLM and not self.vm.visual_prompt:
             self._syncing_ui = True
             self.llm_prompt_edit.clear()
@@ -1650,6 +1732,8 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
         if spec.modality in (ModelModality.VIDEO_AUDIO, ModelModality.VIDEO):
             self.studio_stack.setCurrentIndex(0)
             self.video_frames_card.setVisible(self.vm.task_mode_id in ("fl2va", "ref2va"))
+            if hasattr(self, "ref2va_assets_card"):
+                self.ref2va_assets_card.setVisible(self.vm.task_mode_id == "ref2va")
             self.shared_media_split.setVisible(True)
             self.right_gallery_stack.setCurrentIndex(0)
             self._update_gen_bar(

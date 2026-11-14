@@ -184,10 +184,10 @@ let OPEN_MODEL_CATALOG: [OpenModelSpec] = [
             ),
             TaskModeItem(
                 id: "ref2va",
-                titleZh: "主体参考图生视频",
-                titleEn: "Reference Images to Video+Audio",
-                subtitleZh: "上传 1~2 张角色/场景参考图（可用 <Picture 1> / <Picture 2> 指代），保持主体一致性生视频",
-                subtitleEn: "Upload 1–2 subject/scene references (refer via <Picture 1> / <Picture 2>) for identity-consistent video",
+                titleZh: "多模态参考生视频 (Ref2VA)",
+                titleEn: "Multimodal Ref to Video+Audio",
+                subtitleZh: "最多上传 9 张参考图 (<Picture 1>~<Picture 9>) + 3 段参考视频 (<Video 1>~<Video 3>)，锁定主体与运镜",
+                subtitleEn: "Up to 9 ref images (<Picture 1>–<Picture 9>) + 3 ref videos (<Video 1>–<Video 3>) for subject & motion lock",
                 icon: "person.2.crop.square.stack"
             )
         ],
@@ -212,13 +212,13 @@ let OPEN_MODEL_CATALOG: [OpenModelSpec] = [
     ),
     OpenModelSpec(
         id: "minimax_h3_ref2va",
-        nameZh: "MiniMax-H3-Ref2VA (33B · 多参考图)",
-        nameEn: "MiniMax-H3-Ref2VA (33B · Ref2VA)",
+        nameZh: "MiniMax-H3-Ref2VA (33B · 9图+3视频)",
+        nameEn: "MiniMax-H3-Ref2VA (33B · 9 Imgs + 3 Vids)",
         repoId: "MiniMaxAI/MiniMax-H3",
-        badgeZh: "多图主体一致 · 134 GB (共享省72G)",
-        badgeEn: "Subject Ref2VA · 134 GB (Shares 72G)",
-        summaryZh: "MiniMax-H3 官方 Ref2VA 主体参考图生音视频分支（自动零拷贝共享 72.4GB 编码器与音视频 VAE，仅增量下载 61.7GB DiT）",
-        summaryEn: "Official MiniMax-H3 Ref2VA multi-reference subject-to-video+audio branch (zero-copy shares 72.4GB encoder & VAEs)",
+        badgeZh: "9图+3视频参考 · 134 GB (共享省72G)",
+        badgeEn: "9 Imgs + 3 Vids Ref · 134 GB (Shares 72G)",
+        summaryZh: "MiniMax-H3 官方 Ref2VA 多模态参考分支：支持最多 9 张参考图 + 3 段参考视频（零拷贝共享 72.4GB 编码器与音视频 VAE）",
+        summaryEn: "Official MiniMax-H3 Ref2VA branch: supports up to 9 reference images + 3 reference videos (zero-copy shares 72.4GB encoder & VAEs)",
         approxSizeGB: 134.1,
         icon: "person.2.crop.square.stack",
         modality: .videoAudio,
@@ -226,10 +226,10 @@ let OPEN_MODEL_CATALOG: [OpenModelSpec] = [
         modes: [
             TaskModeItem(
                 id: "ref2va",
-                titleZh: "主体参考图生视频",
-                titleEn: "Reference Images to Video+Audio",
-                subtitleZh: "上传 1~2 张角色/场景参考图（可用 <Picture 1> / <Picture 2> 指代），保持主体一致性生视频",
-                subtitleEn: "Upload 1–2 subject/scene references (refer via <Picture 1> / <Picture 2>) for identity-consistent video",
+                titleZh: "多模态参考生视频 (Ref2VA)",
+                titleEn: "Multimodal Ref to Video+Audio",
+                subtitleZh: "最多上传 9 张参考图 (<Picture 1>~<Picture 9>) + 3 段参考视频 (<Video 1>~<Video 3>)，锁定主体与运镜",
+                subtitleEn: "Up to 9 ref images (<Picture 1>–<Picture 9>) + 3 ref videos (<Video 1>–<Video 3>) for subject & motion lock",
                 icon: "person.2.crop.square.stack"
             ),
             TaskModeItem(

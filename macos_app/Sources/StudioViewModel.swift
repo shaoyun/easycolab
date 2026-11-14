@@ -265,6 +265,9 @@ class StudioViewModel: ObservableObject {
     @Published var selectedOffload: String = "disk"
 
     // 任务模式与生成参数
+    static let maxRef2VAImages: Int = 9
+    static let maxRef2VAVideos: Int = 3
+
     @Published var taskModeId: String = "t2va"
     @Published var visualPrompt: String = PRESET_TEMPLATES[0].visual
     @Published var negativePrompt: String = ""
@@ -272,6 +275,62 @@ class StudioViewModel: ObservableObject {
     @Published var musicPrompt: String = PRESET_TEMPLATES[0].music
     @Published var firstFrameImage: NSImage? = nil
     @Published var lastFrameImage: NSImage? = nil
+    @Published var ref2vaImages: [NSImage] = []
+    @Published var ref2vaVideoURLs: [URL] = []
+
+    var effectiveRef2VAImages: [NSImage] {
+        if !ref2vaImages.isEmpty {
+            return Array(ref2vaImages.prefix(Self.maxRef2VAImages))
+        }
+        return [firstFrameImage, lastFrameImage].compactMap { $0 }
+    }
+
+    func addRef2VAImages(_ newImages: [NSImage]) {
+        for img in newImages {
+            guard ref2vaImages.count < Self.maxRef2VAImages else { break }
+            ref2vaImages.append(img)
+        }
+    }
+
+    func removeRef2VAImage(at index: Int) {
+        guard ref2vaImages.indices.contains(index) else { return }
+        ref2vaImages.remove(at: index)
+    }
+
+    func clearRef2VAImages() {
+        ref2vaImages.removeAll()
+        if taskModeId == "ref2va" {
+            firstFrameImage = nil
+            lastFrameImage = nil
+        }
+    }
+
+    func addRef2VAVideos(_ urls: [URL]) {
+        for u in urls {
+            guard ref2vaVideoURLs.count < Self.maxRef2VAVideos else { break }
+            if !ref2vaVideoURLs.contains(u) {
+                ref2vaVideoURLs.append(u)
+            }
+        }
+    }
+
+    func removeRef2VAVideo(at index: Int) {
+        guard ref2vaVideoURLs.indices.contains(index) else { return }
+        ref2vaVideoURLs.remove(at: index)
+    }
+
+    func clearRef2VAVideos() {
+        ref2vaVideoURLs.removeAll()
+    }
+
+    func insertReferenceTagIntoPrompt(_ tag: String) {
+        let trimmed = visualPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            visualPrompt = tag + " "
+        } else if !visualPrompt.contains(tag) {
+            visualPrompt = visualPrompt + (visualPrompt.hasSuffix(" ") ? "" : " ") + tag
+        }
+    }
     @Published var selectedVideoResolution: ResolutionOption = VIDEO_RESOLUTIONS[0]
     @Published var selectedImageResolution: ResolutionOption = IMAGE_RESOLUTIONS[0]
     @Published var numFrames: Double = 124
@@ -1250,10 +1309,10 @@ class StudioViewModel: ObservableObject {
             )
             return
         }
-        if taskModeId == "ref2va" && firstFrameImage == nil && lastFrameImage == nil {
+        if taskModeId == "ref2va" && effectiveRef2VAImages.isEmpty && ref2vaVideoURLs.isEmpty {
             statusMessage = L(
-                "在「主体参考图生视频 (Ref2VA)」模式下，请至少拖入一张角色或场景参考图（提示词中可用 <Picture 1> 引用）。",
-                "In Reference-to-Video (Ref2VA) mode, please drop at least one subject or scene reference image (refer via <Picture 1>)."
+                "在「多模态参考生视频 (Ref2VA)」模式下，请至少添加 1 张参考图（最多 9 张 <Picture 1>~<Picture 9>）或 1 段参考视频（最多 3 段 <Video 1>~<Video 3>）。",
+                "In Reference-to-Video (Ref2VA) mode, please add at least 1 reference image (up to 9: <Picture 1>–<Picture 9>) or 1 reference video (up to 3: <Video 1>–<Video 3>)."
             )
             return
         }
@@ -1365,7 +1424,20 @@ class StudioViewModel: ObservableObject {
             }
 
             let needsImage = ["fl2va", "ref2va", "i2v", "i2i_edit", "vlm"].contains(taskModeId)
-            if needsImage {
+            if taskModeId == "ref2va" {
+                let refImgsB64 = effectiveRef2VAImages.prefix(Self.maxRef2VAImages).compactMap { encodeImageToBase64($0) }
+                if !refImgsB64.isEmpty {
+                    payload["ref_images_base64"] = refImgsB64
+                    payload["first_frame_base64"] = refImgsB64[0]
+                    if refImgsB64.count > 1 {
+                        payload["last_frame_base64"] = refImgsB64[1]
+                    }
+                }
+                let refVidsB64 = ref2vaVideoURLs.prefix(Self.maxRef2VAVideos).compactMap { encodeVideoFileToBase64($0) }
+                if !refVidsB64.isEmpty {
+                    payload["ref_videos_base64"] = refVidsB64
+                }
+            } else if needsImage {
                 if let firstImg = firstFrameImage, let b64 = encodeImageToBase64(firstImg) {
                     payload["first_frame_base64"] = b64
                 }
@@ -1691,6 +1763,13 @@ class StudioViewModel: ObservableObject {
             return nil
         }
         return jpegData.base64EncodedString()
+    }
+
+    func encodeVideoFileToBase64(_ url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            return nil
+        }
+        return data.base64EncodedString()
     }
 }
 

@@ -522,6 +522,350 @@ struct FrameDropWell: View {
     }
 }
 
+// MARK: - Ref2VA 官方满血多模态参考面板（最多 9 张参考图 <Picture 1>~<Picture 9> + 3 段参考视频 <Video 1>~<Video 3>）
+
+struct Ref2VAMultiReferencePanel: View {
+    @ObservedObject var vm: StudioViewModel
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isImageDropTargeted: Bool = false
+    @State private var isVideoDropTargeted: Bool = false
+
+    private let imageColumns = [
+        GridItem(.adaptive(minimum: 128, maximum: 185), spacing: 10)
+    ]
+
+    var body: some View {
+        let palette = StudioPalette(colorScheme: colorScheme)
+        VStack(alignment: .leading, spacing: 14) {
+            // 1. 参考图区域（上限 9 张）
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "photo.stack.fill")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                    Text(L(
+                        "角色 / 主体 / 场景参考图（最多 \(StudioViewModel.maxRef2VAImages) 张 · 点击标签可插入 <Picture 1> ~ <Picture 9>）",
+                        "Character / Subject / Scene Images (Up to \(StudioViewModel.maxRef2VAImages) · Click tag to insert <Picture 1>–<Picture 9>)"
+                    ))
+                    .font(.system(size: 12.5, weight: .semibold))
+
+                    Spacer()
+
+                    Text("\(vm.ref2vaImages.count) / \(StudioViewModel.maxRef2VAImages)")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(vm.ref2vaImages.count >= StudioViewModel.maxRef2VAImages ? Color.orange : Color.accentColor)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+
+                    if vm.ref2vaImages.count < StudioViewModel.maxRef2VAImages {
+                        Button {
+                            pickMultipleImages()
+                        } label: {
+                            Label(L("添加参考图", "Add Images"), systemImage: "plus.circle.fill")
+                                .font(.caption.weight(.medium))
+                        }
+                        .controlSize(.small)
+                    }
+
+                    if !vm.ref2vaImages.isEmpty {
+                        Button(role: .destructive) {
+                            vm.clearRef2VAImages()
+                        } label: {
+                            Text(L("清空", "Clear"))
+                                .font(.caption)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
+                LazyVGrid(columns: imageColumns, spacing: 10) {
+                    ForEach(Array(vm.ref2vaImages.enumerated()), id: \.offset) { idx, img in
+                        let tag = "<Picture \(idx + 1)>"
+                        ZStack(alignment: .topLeading) {
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(palette.inputFill)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 9)
+                                        .strokeBorder(palette.cardBorder, lineWidth: 1.0)
+                                )
+
+                            Image(nsImage: img)
+                                .resizable()
+                                .scaledToFit()
+                                .cornerRadius(7)
+                                .padding(5)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                            HStack(spacing: 4) {
+                                Button {
+                                    vm.insertReferenceTagIntoPrompt(tag)
+                                } label: {
+                                    Text(tag)
+                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2.5)
+                                        .background(Capsule().fill(Color.black.opacity(0.74)))
+                                }
+                                .buttonStyle(.plain)
+                                .help(L("点击将 \(tag) 插入提示词", "Click to insert \(tag) into prompt"))
+
+                                Spacer()
+
+                                Button {
+                                    vm.removeRef2VAImage(at: idx)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(.white, .black.opacity(0.7))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(6)
+                        }
+                        .frame(height: 112)
+                    }
+
+                    if vm.ref2vaImages.count < StudioViewModel.maxRef2VAImages {
+                        let nextIdx = vm.ref2vaImages.count + 1
+                        Button {
+                            pickMultipleImages()
+                        } label: {
+                            VStack(spacing: 5) {
+                                Image(systemName: "photo.badge.plus")
+                                    .font(.system(size: 20, weight: .medium))
+                                    .foregroundStyle(Color.accentColor)
+                                Text(L("添加 <Picture \(nextIdx)>", "Add <Picture \(nextIdx)>"))
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                Text(L("支持一次拖入或多选最多 \(StudioViewModel.maxRef2VAImages) 张", "Drop or multi-select up to \(StudioViewModel.maxRef2VAImages) images"))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .padding(8)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 112)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9)
+                                    .fill(palette.inputFill)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 9)
+                                            .strokeBorder(
+                                                isImageDropTargeted ? Color.accentColor : palette.cardBorder,
+                                                style: StrokeStyle(lineWidth: isImageDropTargeted ? 2.0 : 1.1, dash: [5])
+                                            )
+                                    )
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .onDrop(of: [.fileURL, .image], isTargeted: $isImageDropTargeted) { providers in
+                    handleImageDrop(providers: providers)
+                }
+            }
+
+            Divider().opacity(0.45)
+
+            // 2. 参考视频区域（上限 3 段）
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "video.badge.plus")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                    Text(L(
+                        "动作 / 运镜参考视频（最多 \(StudioViewModel.maxRef2VAVideos) 段 · 点击标签可插入 <Video 1> ~ <Video 3>）",
+                        "Motion / Camera Reference Videos (Up to \(StudioViewModel.maxRef2VAVideos) · Click tag to insert <Video 1>–<Video 3>)"
+                    ))
+                    .font(.system(size: 12.5, weight: .semibold))
+
+                    Spacer()
+
+                    Text("\(vm.ref2vaVideoURLs.count) / \(StudioViewModel.maxRef2VAVideos)")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(vm.ref2vaVideoURLs.count >= StudioViewModel.maxRef2VAVideos ? Color.orange : Color.accentColor)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+
+                    if vm.ref2vaVideoURLs.count < StudioViewModel.maxRef2VAVideos {
+                        Button {
+                            pickMultipleVideos()
+                        } label: {
+                            Label(L("添加参考视频", "Add Videos"), systemImage: "plus.circle.fill")
+                                .font(.caption.weight(.medium))
+                        }
+                        .controlSize(.small)
+                    }
+
+                    if !vm.ref2vaVideoURLs.isEmpty {
+                        Button(role: .destructive) {
+                            vm.clearRef2VAVideos()
+                        } label: {
+                            Text(L("清空", "Clear"))
+                                .font(.caption)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    ForEach(0..<StudioViewModel.maxRef2VAVideos, id: \.self) { slotIdx in
+                        let vTag = "<Video \(slotIdx + 1)>"
+                        if slotIdx < vm.ref2vaVideoURLs.count {
+                            let vURL = vm.ref2vaVideoURLs[slotIdx]
+                            HStack(spacing: 8) {
+                                Image(systemName: "film.stack.fill")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundStyle(Color.accentColor)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Button {
+                                        vm.insertReferenceTagIntoPrompt(vTag)
+                                    } label: {
+                                        Text(vTag)
+                                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(Color.accentColor)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 1.5)
+                                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(L("点击将 \(vTag) 插入提示词", "Click to insert \(vTag) into prompt"))
+
+                                    Text(vURL.lastPathComponent)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+
+                                Spacer(minLength: 4)
+
+                                Button {
+                                    vm.removeRef2VAVideo(at: slotIdx)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 62)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9)
+                                    .fill(palette.inputFill)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 9)
+                                            .strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 1.1)
+                                    )
+                            )
+                        } else {
+                            Button {
+                                pickMultipleVideos()
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "video.badge.plus")
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundStyle(Color.secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(L("参考视频 \(slotIdx + 1) (\(vTag) · 可选)", "Ref Video \(slotIdx + 1) (\(vTag) · Optional)"))
+                                            .font(.system(size: 11.5, weight: .semibold))
+                                            .foregroundStyle(.primary)
+                                        Text(L("拖入或选择 MP4 / MOV", "Drop or browse MP4 / MOV"))
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 62)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 9)
+                                        .fill(palette.inputFill)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 9)
+                                                .strokeBorder(
+                                                    isVideoDropTargeted ? Color.accentColor : palette.cardBorder,
+                                                    style: StrokeStyle(lineWidth: isVideoDropTargeted ? 2.0 : 1.0, dash: [5])
+                                                )
+                                        )
+                                )
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .onDrop(of: [.fileURL, .movie], isTargeted: $isVideoDropTargeted) { providers in
+                    handleVideoDrop(providers: providers)
+                }
+            }
+        }
+    }
+
+    private func pickMultipleImages() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK {
+            let loaded = panel.urls.compactMap { NSImage(contentsOf: $0) }
+            vm.addRef2VAImages(loaded)
+        }
+    }
+
+    private func pickMultipleVideos() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.movie, .mpeg4Movie, .quickTimeMovie]
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK {
+            vm.addRef2VAVideos(panel.urls)
+        }
+    }
+
+    private func handleImageDrop(providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for provider in providers {
+            if provider.canLoadObject(ofClass: URL.self) {
+                handled = true
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url = url, let loaded = NSImage(contentsOf: url) {
+                        DispatchQueue.main.async {
+                            vm.addRef2VAImages([loaded])
+                        }
+                    }
+                }
+            }
+        }
+        return handled
+    }
+
+    private func handleVideoDrop(providers: [NSItemProvider]) -> Bool {
+        let validExts: Set<String> = ["mp4", "mov", "m4v", "webm", "mkv", "avi"]
+        var handled = false
+        for provider in providers {
+            if provider.canLoadObject(ofClass: URL.self) {
+                handled = true
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url = url, validExts.contains(url.pathExtension.lowercased()) {
+                        DispatchQueue.main.async {
+                            vm.addRef2VAVideos([url])
+                        }
+                    }
+                }
+            }
+        }
+        return handled
+    }
+}
+
 
 // MARK: - 通用 UI 容器组件
 

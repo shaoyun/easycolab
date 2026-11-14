@@ -337,9 +337,12 @@ class HighTierAllocationReconciliationTest(unittest.TestCase):
 
 def _load_minimax_h3_image_helpers(tmp_root: str):
     import json
+    import base64
     import re
     import shutil
-    from typing import Any, Dict, List, Optional, Tuple
+    import tempfile
+    from typing import Any, Dict, List, Optional, Sequence, Tuple
+    from PIL import Image
 
     with open(APP_PY_PATH, "r", encoding="utf-8") as f:
         source = f.read()
@@ -352,6 +355,10 @@ def _load_minimax_h3_image_helpers(tmp_root: str):
         "BUILTIN_MODEL_IDS",
         "MINIMAX_H3_IMAGE_CONFIG_PATTERNS",
         "MINIMAX_H3_IMAGE_REQUIRED_CONFIG_MARKERS",
+        "MAX_REF2VA_IMAGES",
+        "MAX_REF2VA_VIDEOS",
+        "MAX_REF2VA_AUDIOS",
+        "MAX_REF2VA_TOTAL_ASSETS",
     }
     wanted_funcs = {
         "_normalize_builtin_model_alias",
@@ -362,6 +369,11 @@ def _load_minimax_h3_image_helpers(tmp_root: str):
         "prepare_minimax_h3_image_assembled_dir",
         "run_minimax_h3_image_inference",
         "_run_pipeline_with_smart_tiling",
+        "_align_minimax_h3_frame_count",
+        "load_reference_video_frames",
+        "decode_base64_video_frames",
+        "build_minimax_h3_references",
+        "decode_base64_image",
     }
     selected = []
     for node in tree.body:
@@ -394,13 +406,18 @@ def _load_minimax_h3_image_helpers(tmp_root: str):
 
     ns = {
         "os": os,
+        "io": io,
         "re": re,
         "json": json,
+        "base64": base64,
         "shutil": shutil,
+        "tempfile": tempfile,
+        "Image": Image,
         "Any": Any,
         "Dict": Dict,
         "List": List,
         "Optional": Optional,
+        "Sequence": Sequence,
         "Tuple": Tuple,
         "torch": fake_torch,
         "DRIVE_MOUNTED": False,
@@ -626,6 +643,38 @@ class MiniMaxH3ImageEngineTest(unittest.TestCase):
             self.assertEqual(out2, ("LEGACY_VID", "LEGACY_AUD"))
             self.assertEqual(legacy_recorded[-1]["keyframes"], ["IMG_1", "IMG_2"])
             self.assertEqual(legacy_recorded[-1]["keyframe_indices"], [0, -1])
+
+    def test_ref2va_official_limits_9_images_and_3_videos(self):
+        import tempfile
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ns, _ = _load_minimax_h3_image_helpers(tmp)
+            self.assertEqual(ns["MAX_REF2VA_IMAGES"], 9)
+            self.assertEqual(ns["MAX_REF2VA_VIDEOS"], 3)
+            self.assertEqual(ns["MAX_REF2VA_AUDIOS"], 3)
+            self.assertEqual(ns["MAX_REF2VA_TOTAL_ASSETS"], 12)
+
+            # 11 candidate images + 4 candidate videos -> capped at 9 images + 3 videos (= 12 total)
+            imgs = [Image.new("RGB", (64, 64), (i * 20, 10, 10)) for i in range(11)]
+            vids = [[Image.new("RGB", (64, 64), (0, v * 40, k * 10)) for k in range(8)] for v in range(4)]
+
+            refs = ns["build_minimax_h3_references"](
+                ref_images=imgs,
+                ref_videos=vids,
+                width=832,
+                height=480,
+                fps=24,
+                max_video_frames=124,
+            )
+            self.assertEqual(len(refs), 12)
+            img_refs = [r for r in refs if r["type"] == "image"]
+            vid_refs = [r for r in refs if r["type"] == "video"]
+            self.assertEqual(len(img_refs), 9)
+            self.assertEqual(len(vid_refs), 3)
+            # 8 frames aligned to 17k+5 -> 22 frames, each resized to (832, 480)
+            self.assertEqual(len(vid_refs[0]["video"]), 22)
+            self.assertEqual(vid_refs[0]["video"][0].size, (832, 480))
 
 
 if __name__ == "__main__":

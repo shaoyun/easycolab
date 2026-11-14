@@ -239,6 +239,45 @@ class WorkspaceMixin:
         self.video_frames_card.body.addLayout(wells_row)
         lay.addWidget(self.video_frames_card)
 
+        # Ref2VA Multi-Reference Card (Up to 9 Images + Up to 3 Videos)
+        self.ref2va_assets_card = WorkspaceCard(
+            tr("多模态参考资产工作台 (Ref2VA · 最多 9 张参考图 + 3 段参考视频)", "Multimodal Reference Assets (Ref2VA · Up to 9 Images + 3 Videos)"),
+            tr(
+                "按 MiniMax-H3 Ref2VA 官方模型上限设计：最多选择 9 张参考图（<Picture 1>~<Picture 9>）与 3 段参考视频（<Video 1>~<Video 3>），总资产上限 12 个",
+                "Official MiniMax-H3 Ref2VA capacity: up to 9 reference images (<Picture 1>–<Picture 9>) + 3 reference videos (<Video 1>–<Video 3>), max 12 assets total",
+            ),
+        )
+        self.ref2va_image_paths: List[str] = []
+        self.ref2va_video_paths: List[str] = []
+
+        ref_img_row = QHBoxLayout()
+        ref_img_row.setSpacing(8)
+        self.ref2va_img_status_lbl = QLabel(tr("参考图片 (0/9)：尚未添加（或直接使用上方首尾帧槽位）", "Ref Images (0/9): None added"))
+        self.ref2va_img_status_lbl.setWordWrap(True)
+        ref_img_row.addWidget(self.ref2va_img_status_lbl, 1)
+        self.ref2va_add_imgs_btn = QPushButton(tr("➕ 选择参考图 (最多9张)", "➕ Add Images (Max 9)"))
+        self.ref2va_add_imgs_btn.clicked.connect(self._on_pick_ref2va_images)
+        ref_img_row.addWidget(self.ref2va_add_imgs_btn)
+        self.ref2va_clear_imgs_btn = QPushButton(tr("清空图片", "Clear"))
+        self.ref2va_clear_imgs_btn.clicked.connect(self._on_clear_ref2va_images)
+        ref_img_row.addWidget(self.ref2va_clear_imgs_btn)
+        self.ref2va_assets_card.body.addLayout(ref_img_row)
+
+        ref_vid_row = QHBoxLayout()
+        ref_vid_row.setSpacing(8)
+        self.ref2va_vid_status_lbl = QLabel(tr("参考视频 (0/3)：尚未添加 (<Video 1> ~ <Video 3>)", "Ref Videos (0/3): None added (<Video 1>–<Video 3>)"))
+        self.ref2va_vid_status_lbl.setWordWrap(True)
+        ref_vid_row.addWidget(self.ref2va_vid_status_lbl, 1)
+        self.ref2va_add_vids_btn = QPushButton(tr("🎬 选择参考视频 (最多3段)", "🎬 Add Videos (Max 3)"))
+        self.ref2va_add_vids_btn.clicked.connect(self._on_pick_ref2va_videos)
+        ref_vid_row.addWidget(self.ref2va_add_vids_btn)
+        self.ref2va_clear_vids_btn = QPushButton(tr("清空视频", "Clear"))
+        self.ref2va_clear_vids_btn.clicked.connect(self._on_clear_ref2va_videos)
+        ref_vid_row.addWidget(self.ref2va_clear_vids_btn)
+        self.ref2va_assets_card.body.addLayout(ref_vid_row)
+
+        lay.addWidget(self.ref2va_assets_card)
+
         # Multimodal Prompt Composer
         p_card = WorkspaceCard(
             tr("镜头与多模态提示词", "Camera & Multimodal Audio-Video Prompt"),
