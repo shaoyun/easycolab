@@ -50,6 +50,7 @@ DerivedData/
 
 # Python Virtual Environments & Bytecode
 .venv/
+.venv_dev/
 .venv_win/
 venv/
 ENV/

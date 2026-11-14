@@ -134,12 +134,16 @@ def ensure_runtime_dependencies():
         print("缺失依赖自动安装完成。")
 
 
-ensure_runtime_dependencies()
+_IS_LOCAL_PREVIEW = (
+    os.environ.get("EASYCOLAB_LOCAL_PREVIEW", "").strip() in ("1", "true", "yes")
+    or "--local" in sys.argv
+)
+if not _IS_LOCAL_PREVIEW:
+    ensure_runtime_dependencies()
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # 强制 DiffSynth-Studio 所有内置下载走 HuggingFace 国际高速源 (彻底杜绝回退到国内 ModelScope 导致 1~2MB/s)
-os.environ["DIFFSYNTH_DOWNLOAD_SOURCE"] = "huggingface"
-# 将 DiskMap 的句柄缓冲阈值扩大至 1TB，避免加载 33B 模型时频繁关闭/重开 safetensors 映射
 os.environ["DIFFSYNTH_DISK_MAP_BUFFER_SIZE"] = str(10**12)
+os.environ["DIFFSYNTH_DOWNLOAD_SOURCE"] = "huggingface"
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import json
@@ -147,7 +151,36 @@ import shutil
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import torch
+try:
+    import torch
+except ImportError:
+    if not _IS_LOCAL_PREVIEW:
+        raise
+    import types as _types
+
+    class _StubCuda:
+        OutOfMemoryError = RuntimeError
+        @staticmethod
+        def is_available() -> bool:
+            return False
+        @staticmethod
+        def mem_get_info(_dev=None):
+            return (0, 0)
+        @staticmethod
+        def empty_cache():
+            pass
+
+    torch = _types.SimpleNamespace(
+        cuda=_StubCuda(),
+        bfloat16="bfloat16",
+        float16="float16",
+        float32="float32",
+        Tensor=object,
+        nn=_types.SimpleNamespace(Module=object, ModuleList=list),
+        randint=lambda low, high, size: _types.SimpleNamespace(item=lambda: 42),
+        Generator=lambda device="cpu": _types.SimpleNamespace(manual_seed=lambda s: None),
+    )
+    sys.modules["torch"] = torch
 import gradio as gr
 from PIL import Image
 
@@ -187,7 +220,8 @@ def _ensure_torchaudio_compatible():
                 pass
 
 
-_ensure_torchaudio_compatible()
+if not _IS_LOCAL_PREVIEW:
+    _ensure_torchaudio_compatible()
 
 
 def _register_triton_causal_conv1d_shim():
@@ -10364,6 +10398,14 @@ def create_ui() -> gr.Blocks:
             with gr.Column(scale=4):
                 with gr.Group():
                     sec1_md = gr.Markdown("### 📦 1. 模型权重管理中心 (先下载检查，再加载显存)")
+                    model_selector_dropdown = gr.Dropdown(
+                        choices=[
+                            (f"{mspec['name']} · {mspec['category']}", mid)
+                            for mid, mspec in MODEL_CATALOG.items()
+                        ],
+                        value=SELECTED_MODEL_ID,
+                        label="🤖 当前活动模型 (Active Model)",
+                    )
                     gpu_status_text = gr.Textbox(
                         label="硬件、算力消耗与模型检查报告",
                         value=get_gpu_and_model_summary_text(),
@@ -10678,6 +10720,19 @@ def create_ui() -> gr.Blocks:
         tab_fl2va.select(fn=lambda: "fl2va", inputs=None, outputs=task_mode_state)
         tab_ref2va.select(fn=lambda: "ref2va", inputs=None, outputs=task_mode_state)
 
+        def _on_webui_select_model(mid: str):
+            global SELECTED_MODEL_ID
+            norm_id = _normalize_builtin_model_alias(mid)
+            if norm_id and norm_id in MODEL_CATALOG:
+                SELECTED_MODEL_ID = norm_id
+            return get_gpu_and_model_summary_text()
+
+        model_selector_dropdown.change(
+            fn=_on_webui_select_model,
+            inputs=[model_selector_dropdown],
+            outputs=[gpu_status_text],
+        )
+
         refresh_gpu_btn.click(fn=get_gpu_and_model_summary_text, inputs=None, outputs=gpu_status_text)
 
         def _refresh_gradio_trending_choices(tok: str):
@@ -10767,32 +10822,52 @@ if __name__ == "__main__":
     import getpass
     from gradio import networking
 
-    if authenticated_ingress is not None and (_DEPLOY_PASSWORD or sys.stdin.isatty()):
-        password = _DEPLOY_PASSWORD or getpass.getpass("Management password (24+ URL-safe characters): ")
-        ingress_ctx = authenticated_ingress(password)
-    else:
-        ingress_ctx = contextlib.nullcontext()
-
-    # Unwind the ingress context on a headless hot redeploy (pkill sends TERM).
     def stop_server(signum, frame):
         raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, stop_server)
-    with ingress_ctx:
+
+    if _IS_LOCAL_PREVIEW:
+        local_port = int(os.environ.get("EASYCOLAB_PORT", str(GRADIO_INGRESS)))
         ui = create_ui()
         ui.queue()
         app, _, _ = ui.launch(
-            server_name="127.0.0.1", server_port=GRADIO_BACKEND, share=False,
-            inline=False, prevent_thread_lock=True, css=CUSTOM_CSS,
+            server_name="127.0.0.1",
+            server_port=local_port,
+            share=False,
+            inbrowser=True,
+            inline=False,
+            prevent_thread_lock=True,
+            css=CUSTOM_CSS,
         )
         attach_macos_api_routes(app)
-        tunnel = networking.setup_tunnel(
-            local_host="127.0.0.1", local_port=GRADIO_INGRESS, share_token=ui.share_token,
-            share_server_address=None, share_server_tls_certificate=None,
-        )
-        share_url = urllib.parse.urlsplit(tunnel)._replace(scheme="https").geturl()
-        print(f"EasyColab URL: {share_url}", flush=True)
+        print(f"🌐 EasyColab 本地网页调试端已启动: http://127.0.0.1:{local_port}", flush=True)
         try:
             ui.block_thread()
         finally:
             ui.close()
+    else:
+        if authenticated_ingress is not None and (_DEPLOY_PASSWORD or sys.stdin.isatty()):
+            password = _DEPLOY_PASSWORD or getpass.getpass("Management password (24+ URL-safe characters): ")
+            ingress_ctx = authenticated_ingress(password)
+        else:
+            ingress_ctx = contextlib.nullcontext()
+
+        with ingress_ctx:
+            ui = create_ui()
+            ui.queue()
+            app, _, _ = ui.launch(
+                server_name="127.0.0.1", server_port=GRADIO_BACKEND, share=False,
+                inline=False, prevent_thread_lock=True, css=CUSTOM_CSS,
+            )
+            attach_macos_api_routes(app)
+            tunnel = networking.setup_tunnel(
+                local_host="127.0.0.1", local_port=GRADIO_INGRESS, share_token=ui.share_token,
+                share_server_address=None, share_server_tls_certificate=None,
+            )
+            share_url = urllib.parse.urlsplit(tunnel)._replace(scheme="https").geturl()
+            print(f"EasyColab URL: {share_url}", flush=True)
+            try:
+                ui.block_thread()
+            finally:
+                ui.close()
