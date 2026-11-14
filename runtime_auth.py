@@ -15,34 +15,69 @@ GRADIO_INGRESS = 7860
 GRADIO_BACKEND = 27860
 COMFY_INGRESS = 8188
 COMFY_BACKEND = 28188
+TOYBOX_INGRESS = 8190
+TOYBOX_BACKEND = 28190
 INFERENCE_PATHS = (
-    "/models", "/chat/completions", "/images/generations",
+    "/models", "/chat/completions", "/images/generations", "/images/edits", "/videos",
     "/messages/count_tokens", "/messages",
-    "/v1/models", "/v1/chat/completions", "/v1/images/generations",
+    "/v1/models", "/v1/chat/completions", "/v1/images/generations", "/v1/images/edits", "/v1/videos",
     "/v1/messages/count_tokens", "/v1/messages",
     "/v1/v1/messages/count_tokens", "/v1/v1/messages",
 )
 
+# Strict pattern-based inference routes (e.g. /v1/models/{id}, /v1/videos/{id}/content, /v1/images/files/{name}).
+# Kept narrow so /v1/models/, /v1/unknown, and traversal paths still fall through to location / (Basic Auth).
+INFERENCE_REGEX_PATHS = (
+    r"^(?:/v1)?/models/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?$",
+    r"^(?:/v1)?/videos/[A-Za-z0-9_-]+(?:/content)?$",
+    r"^(?:/v1)?/images/files/[A-Za-z0-9._-]+$",
+)
+
+
+def _inference_location(match_expr, backend, suffix="", dotdot_guard=False):
+    guard = 'if ($uri ~ "(?:^|/)\\.\\.(?:$|/)") { return 401; }' if dotdot_guard else ""
+    return f"""location {match_expr} {{
+                auth_basic off;
+                {guard}
+                if ($request_method = OPTIONS) {{
+                    add_header Access-Control-Allow-Origin "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-API-Key, Anthropic-Version, OpenAI-Beta" always;
+                    add_header Access-Control-Max-Age 86400 always;
+                    return 204;
+                }}
+                add_header Access-Control-Allow-Origin "*" always;
+                add_header Access-Control-Expose-Headers "Content-Disposition" always;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_pass http://127.0.0.1:{backend}{suffix};
+            }}"""
+
 
 def nginx_config(directory):
-    # Send a canonical path to the inference backend. Its API-key check remains
-    # mandatory. Every other path, including upgrades and future routes, is admin.
-    inference = "\n".join(
-        f"location = {path} {{ auth_basic off; proxy_pass http://127.0.0.1:{GRADIO_BACKEND}{path}; }}"
+    # Send canonical inference paths directly to the API gateway (token-authenticated, no Basic Auth
+    # popup, CORS enabled for external web platforms). Every other route stays admin-only behind Basic Auth + CSRF checks.
+    exact_inference = "\n".join(
+        _inference_location(f"= {path}", GRADIO_BACKEND, suffix=path)
         for path in INFERENCE_PATHS
     )
+    regex_inference = "\n".join(
+        _inference_location(f"~ {pattern}", GRADIO_BACKEND, dotdot_guard=True)
+        for pattern in INFERENCE_REGEX_PATHS
+    )
+    inference = f"{exact_inference}\n{regex_inference}"
     def server(port, backend, extra=""):
         return f"""
         server {{
             listen 127.0.0.1:{port};
             auth_basic "EasyColab";
             auth_basic_user_file "{directory}/users";
-            if ($http_sec_fetch_site = cross-site) {{ return 403; }}
-            set $origin_check $http_origin;
-            if ($http_origin = https://$http_host) {{ set $origin_check ""; }}
-            if ($origin_check != "") {{ return 403; }}
             {extra}
             location / {{
+                if ($http_sec_fetch_site = cross-site) {{ return 403; }}
+                set $origin_check $http_origin;
+                if ($http_origin = https://$http_host) {{ set $origin_check ""; }}
+                if ($origin_check != "") {{ return 403; }}
                 proxy_set_header Host $http_host;
                 proxy_set_header X-Forwarded-Proto https;
                 proxy_set_header Upgrade $http_upgrade;
@@ -69,6 +104,7 @@ def nginx_config(directory):
         proxy_hide_header Access-Control-Allow-Origin;
         {server(GRADIO_INGRESS, GRADIO_BACKEND, inference)}
         {server(COMFY_INGRESS, COMFY_BACKEND)}
+        {server(TOYBOX_INGRESS, TOYBOX_BACKEND)}
     }}
     """
 
@@ -93,7 +129,7 @@ def authenticated_ingress(password):
                 # A wrong password must be challenged by both listeners before
                 # either tunnel is published. Fail if a previous proxy owns a port.
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                for port in (GRADIO_INGRESS, COMFY_INGRESS):
+                for port in (GRADIO_INGRESS, COMFY_INGRESS, TOYBOX_INGRESS):
                     for _ in range(100):
                         if proxy.poll() is not None:
                             raise RuntimeError("Authenticated ingress failed to bind")

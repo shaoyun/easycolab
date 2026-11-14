@@ -64,6 +64,7 @@ extension MainStudioView {
             ("controlnet", L("controlnet (姿态 / 深度 / VACE 控制)", "controlnet (Pose / Depth / VACE)")),
             ("upscale_models", L("upscale_models (高清超分放大)", "upscale_models (Super-Resolution Upscalers)")),
             ("audio_encoders", L("audio_encoders (音频驱动 / 配音节点)", "audio_encoders (Audio-Driven / Foley Nodes)")),
+            ("semantic_bridge", L("semantic_bridge (H3 语义桥接权重)", "semantic_bridge (H3 Semantic Bridge Weights)")),
             ("gguf", L("gguf (量化视频/图像主干)", "gguf (Quantized Video / Image Backbones)"))
         ]
 
@@ -174,6 +175,177 @@ extension MainStudioView {
                     Spacer()
                     if vm.comfyRunning && !vm.comfyPublicURL.isEmpty {
                         Text(vm.maskedURLDisplay(vm.comfyPublicURL))
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(Color.accentColor)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8).fill(palette.inputFill))
+            }
+        }
+
+        // 1B. H3 Toybox 独立创作台 (复用底层 ComfyUI 引擎 + 带密码保护的独立公网隧道)
+        WorkspaceCard(
+            title: L("H3 Toybox 独立创作台（带密码独立隧道）", "H3 Toybox Standalone Studio (Password-Protected Tunnel)"),
+            subtitle: L(
+                "复用同一个 ComfyUI 引擎与 Drive 模型库：支持素材库文件夹、@图片1 提示词改写、Ref2VA/首尾帧/视频延伸、P-H3 生图（登录用户名 easycolab）",
+                "Shares the same ComfyUI engine & Drive weights: asset folders, @Pic1 prompt rewriter, Ref2VA/FL2VA/extend & P-H3 image (user: easycolab)"
+            ),
+            icon: "shippingbox.fill",
+            trailing: AnyView(
+                HStack(spacing: 6) {
+                    StatusDot(color: vm.toyboxRunning ? .green : ((vm.toyboxStarting || vm.toyboxPreparingAssets) ? .orange : .secondary.opacity(0.45)))
+                    Text(vm.toyboxRunning
+                         ? L(vm.toyboxPasswordProtected ? "密码隧道在线" : "在线",
+                             vm.toyboxPasswordProtected ? "Secured Online" : "Online")
+                         : (vm.toyboxPreparingAssets
+                            ? L("配齐节点/权重中...", "Preparing...")
+                            : (vm.toyboxStarting ? L("启动隧道中...", "Starting...") : L("未启动", "Stopped"))))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(vm.toyboxRunning ? Color.green : ((vm.toyboxStarting || vm.toyboxPreparingAssets) ? Color.orange : .secondary))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.primary.opacity(0.06)))
+            )
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 14) {
+                    Toggle(L("含 9B 改写 (~7GB)", "9B Rewriter (~7GB)"), isOn: $vm.toyboxIncludeRewriter)
+                        .toggleStyle(.checkbox)
+                    Toggle(L("含 P-H3 生图 (~10GB)", "P-H3 Image (~10GB)"), isOn: $vm.toyboxIncludeImage)
+                        .toggleStyle(.checkbox)
+                    Toggle(L("启动前释放直跑显存", "Unload Direct VRAM First"), isOn: $vm.toyboxUnloadOthersOnStart)
+                        .toggleStyle(.checkbox)
+                    Spacer()
+                    Text(L(
+                        "节点 \(vm.toyboxNodesReady)/\(vm.toyboxNodesTotal) · 权重 \(vm.toyboxCoreModelsReady)/\(vm.toyboxCoreModelsTotal) · 9B \(vm.toyboxRewriterReady ? "已装" : "未装") · 生图 \(vm.toyboxImageReady ? "已装" : "未装")",
+                        "Nodes \(vm.toyboxNodesReady)/\(vm.toyboxNodesTotal) · Core \(vm.toyboxCoreModelsReady)/\(vm.toyboxCoreModelsTotal)"
+                    ))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                }
+                .font(.system(size: 12))
+
+                HStack(spacing: 10) {
+                    if vm.toyboxRunning && !vm.toyboxPublicURL.isEmpty {
+                        Button {
+                            vm.openToyboxInBrowser()
+                        } label: {
+                            HStack(spacing: 7) {
+                                Image(systemName: "safari.fill")
+                                Text(L("在浏览器打开 H3 Toybox", "Open H3 Toybox in Browser"))
+                                    .font(.headline)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                        Button {
+                            copyToPasteboard(
+                                vm.toyboxPublicURL,
+                                tip: L("已复制 H3 Toybox 独立隧道地址", "Copied H3 Toybox tunnel URL")
+                            )
+                        } label: {
+                            Label(L("复制链接", "Copy URL"), systemImage: "doc.on.doc")
+                                .padding(.vertical, 8)
+                        }
+                        .controlSize(.large)
+
+                        if !vm.adminPassword.isEmpty {
+                            Button {
+                                copyToPasteboard(
+                                    vm.adminPassword,
+                                    tip: L("已复制登录密码（浏览器用户名填 easycolab）", "Copied login password (username: easycolab)")
+                                )
+                            } label: {
+                                Label(L("复制密码", "Copy Pass"), systemImage: "key.fill")
+                                    .padding(.vertical, 8)
+                            }
+                            .controlSize(.large)
+                        }
+
+                        Button {
+                            Task { await vm.startRemoteToybox(forceRestart: true, autoOpenBrowser: false) }
+                        } label: {
+                            Label(L("重启", "Restart"), systemImage: "arrow.clockwise")
+                                .padding(.vertical, 8)
+                        }
+                        .controlSize(.large)
+                        .disabled(vm.toyboxStarting || vm.toyboxPreparingAssets)
+
+                        Button {
+                            Task { await vm.stopRemoteToybox(stopComfyToo: false) }
+                        } label: {
+                            Label(L("停止", "Stop"), systemImage: "stop.fill")
+                                .padding(.vertical, 8)
+                        }
+                        .controlSize(.large)
+                        .disabled(vm.toyboxStarting)
+                    } else {
+                        Button {
+                            Task { await vm.prepareRemoteToyboxAssets(autoStart: false) }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if vm.toyboxPreparingAssets {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                }
+                                Text(vm.toyboxPreparingAssets
+                                     ? L("配齐节点/权重 (\(Int((vm.toyboxProgress * 100).rounded()))%)...",
+                                         "Preparing (\(Int((vm.toyboxProgress * 100).rounded()))%)...")
+                                     : L("1. 一键配齐 Toybox 节点与权重", "1. Prepare Nodes & Weights"))
+                                    .fontWeight(.semibold)
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 8)
+                        }
+                        .controlSize(.large)
+                        .disabled(!vm.isConnected || vm.toyboxPreparingAssets || vm.toyboxStarting || vm.comfyDownloadingWeight)
+
+                        Button {
+                            Task { await vm.startRemoteToybox(forceRestart: false, autoOpenBrowser: true) }
+                        } label: {
+                            HStack(spacing: 7) {
+                                if vm.toyboxStarting {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "play.circle.fill")
+                                }
+                                Text(vm.toyboxStarting
+                                     ? L("正在启动 H3 Toybox 密码隧道...", "Starting H3 Toybox Tunnel...")
+                                     : L("2. 一键拉起并打开 H3 Toybox 密码隧道", "2. Launch & Open H3 Toybox Tunnel"))
+                                    .font(.headline)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(!vm.isConnected || vm.toyboxStarting || vm.toyboxPreparingAssets)
+                    }
+                }
+
+                if vm.toyboxStarting || vm.toyboxPreparingAssets {
+                    ProgressView(value: vm.toyboxProgress, total: 1.0)
+                }
+
+                HStack(spacing: 8) {
+                    Image(systemName: vm.toyboxRunning ? "lock.shield.fill" : "info.circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(vm.toyboxRunning ? Color.green : Color.accentColor)
+                    Text(vm.displayToyboxStatusMessage)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Spacer()
+                    if vm.toyboxRunning && !vm.toyboxPublicURL.isEmpty {
+                        Text(vm.maskedURLDisplay(vm.toyboxPublicURL))
                             .font(.system(size: 11.5, design: .monospaced))
                             .foregroundStyle(Color.accentColor)
                             .textSelection(.enabled)

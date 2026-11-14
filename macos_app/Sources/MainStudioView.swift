@@ -97,15 +97,33 @@ struct MainStudioView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openEasyColabGuide)) { _ in
             vm.openOnboardingGuide(step: 0)
         }
-        .alert(L("释放所有 Colab 实例？", "Release All Colab Instances?"), isPresented: $vm.showDisconnectConfirm) {
+        .alert(L("释放当前 Colab 实例？", "Release Selected Colab Instance?"), isPresented: $vm.showDisconnectConfirm) {
             Button(L("取消", "Cancel"), role: .cancel) {}
             Button(L("释放", "Release"), role: .destructive) {
+                Task { await vm.disconnectCurrentOrSelectedInstance() }
+            }
+        } message: {
+            if let cur = vm.activeInstanceProfile, !cur.endpoint.isEmpty {
+                Text(L(
+                    "将停止并销毁当前实例 \(cur.name) (\(cur.accelerator) · \(cur.shortEndpointLabel))；账号下其余实例与网页 Notebook 不受影响。",
+                    "This will terminate \(cur.name) (\(cur.accelerator) · \(cur.shortEndpointLabel)). Other active VMs and browser Notebooks remain untouched."
+                ))
+            } else {
+                Text(L(
+                    "将停止并销毁当前连接的 Colab GPU 实例，计费停止。",
+                    "The active Colab GPU runtime will be terminated and billing will stop."
+                ))
+            }
+        }
+        .alert(L("释放所有 Colab 实例？", "Release All Colab Instances?"), isPresented: $vm.showReleaseAllConfirm) {
+            Button(L("取消", "Cancel"), role: .cancel) {}
+            Button(L("全部释放", "Release All"), role: .destructive) {
                 Task { await vm.disconnectRemoteColab() }
             }
         } message: {
             Text(L(
-                "账号下所有运行中的 Colab GPU 实例将被销毁，计费立即归零。",
-                "All active Colab GPU runtimes under your account will be terminated and CU billing will stop immediately."
+                "账号下所有运行中的 Colab GPU 实例（含其他任务/网页 Notebook）将被销毁，计费立即归零。",
+                "All active Colab GPU runtimes under your account (including other tasks or browser Notebooks) will be terminated and CU billing will stop immediately."
             ))
         }
     }
@@ -217,6 +235,14 @@ struct MainStudioView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if !vm.displayInstanceBadge.isEmpty {
+                    Text(vm.displayInstanceBadge)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.11)))
+                }
             }
 
             Spacer()
@@ -443,7 +469,7 @@ struct MainStudioView: View {
         }
 
         if vm.cliLoggedIn {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Picker(L("机型", "GPU"), selection: $vm.wakeGPUChoice) {
                     Text("G4 · PRO 6000").tag("G4")
                     Text("H100 · 80GB").tag("H100")
@@ -452,16 +478,16 @@ struct MainStudioView: View {
                     Text("T4 · 16GB").tag("T4")
                 }
                 .labelsHidden()
-                .frame(width: 138)
+                .frame(width: 126)
                 .help(L(
                     "默认推荐 G4 (NVIDIA RTX PRO 6000 Blackwell · 96GB 显存)",
                     "Recommended: G4 (NVIDIA RTX PRO 6000 Blackwell · 96GB VRAM)"
                 ))
 
                 Button {
-                    Task { await vm.wakeColabHeadless() }
+                    Task { await vm.wakeColabHeadless(mode: .auto) }
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         if vm.isWakingColab {
                             ProgressView().controlSize(.small)
                         } else {
@@ -469,15 +495,150 @@ struct MainStudioView: View {
                                 .font(.caption)
                         }
                         Text(vm.isWakingColab
-                             ? L("唤醒部署中...", "Deploying...")
-                             : L("唤醒实例并部署", "Wake & Deploy"))
+                             ? L("部署中...", "Deploying...")
+                             : L("唤醒/部署", "Wake/Deploy"))
                             .fontWeight(.medium)
                     }
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(vm.isWakingColab)
+                .help(L("优先热复用同型号实例（不误杀其他实例），未变化时不中断显存任务", "Reuse matching GPU cleanly without stopping other VMs"))
+
+                Button {
+                    Task { await vm.wakeColabHeadless(mode: .newInstance) }
+                } label: {
+                    Image(systemName: "plus.rectangle.on.rectangle")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .disabled(vm.isWakingColab)
+                .help(L("新开一台独立 GPU 实例并存（不覆盖或销毁已有实例）", "Provision an additional co-existing GPU instance"))
             }
+        }
+
+        if vm.cliLoggedIn || !vm.managedInstances.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(L("实例池 (\(vm.managedInstances.count))", "Instances (\(vm.managedInstances.count))"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if vm.activeVMCount > 0 {
+                        Text(L("云端运行 \(vm.activeVMCount) 台", "\(vm.activeVMCount) active"))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.green)
+                    }
+                }
+
+                if vm.managedInstances.isEmpty {
+                    Text(L("暂无运行中实例，点击「唤醒/部署」或「+」创建。", "No active instances yet. Click Wake/Deploy or + to launch."))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(vm.managedInstances) { inst in
+                        let isActive = (vm.activeInstanceProfile?.id == inst.id)
+                        HStack(spacing: 6) {
+                            Button {
+                                Task { await vm.selectInstance(inst.id) }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    StatusDot(color: (isActive && vm.isConnected) ? .green : (inst.isCloudOnline ? .blue : .orange))
+                                    Text(inst.accelerator)
+                                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(isActive ? 0.22 : 0.10)))
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(inst.name)
+                                            .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                                            .lineLimit(1)
+                                        HStack(spacing: 4) {
+                                            Text(inst.shortEndpointLabel)
+                                                .font(.system(size: 9.5, design: .monospaced))
+                                                .foregroundStyle(.secondary)
+                                            if !inst.managed && !inst.endpoint.isEmpty {
+                                                Text(L("网页/未纳管", "Notebook"))
+                                                    .font(.system(size: 9))
+                                                    .foregroundStyle(.orange)
+                                            }
+                                            if inst.wsKeepaliveConnected {
+                                                Image(systemName: "shield.checkmark.fill")
+                                                    .font(.system(size: 9))
+                                                    .foregroundStyle(.green)
+                                            }
+                                        }
+                                    }
+                                    Spacer(minLength: 2)
+                                    if isActive {
+                                        Text(L("当前", "Active"))
+                                            .font(.system(size: 9.5, weight: .semibold))
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                }
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 5)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(isActive ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.035))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .strokeBorder(isActive ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.08), lineWidth: 0.8)
+                                )
+                            }
+                            .buttonStyle(.plain)
+
+                            Menu {
+                                Button {
+                                    Task { await vm.selectInstance(inst.id) }
+                                } label: {
+                                    Label(L("切换并连接", "Switch & Connect"), systemImage: "arrow.right.circle")
+                                }
+                                if !inst.endpoint.isEmpty {
+                                    Button {
+                                        Task { await vm.probeAndAdoptCloudInstance(inst.endpoint) }
+                                    } label: {
+                                        Label(L("探测已有服务地址", "Probe Existing Service URL"), systemImage: "magnifyingglass")
+                                    }
+                                    Button {
+                                        Task { await vm.wakeColabHeadless(mode: .redeployEndpoint(inst.endpoint), forceRedeploy: true) }
+                                    } label: {
+                                        Label(L("覆盖热重载部署到此实例", "Force Redeploy to This Instance"), systemImage: "arrow.triangle.2.circlepath")
+                                    }
+                                    .disabled(vm.isWakingColab)
+                                }
+                                if !inst.serverURL.isEmpty {
+                                    Button {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(inst.serverURL, forType: .string)
+                                    } label: {
+                                        Label(L("复制隧道地址", "Copy Tunnel URL"), systemImage: "doc.on.doc")
+                                    }
+                                }
+                                Divider()
+                                Button(role: .destructive) {
+                                    if !inst.endpoint.isEmpty {
+                                        Task { await vm.disconnectSingleInstance(inst.endpoint) }
+                                    } else {
+                                        vm.managedInstances.removeAll { $0.id == inst.id }
+                                    }
+                                } label: {
+                                    Label(L("释放/移除此实例", "Release / Remove Instance"), systemImage: "trash")
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 20)
+                        }
+                    }
+                }
+            }
+            .padding(7)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.03)))
         }
 
         HStack(spacing: 6) {
@@ -706,19 +867,33 @@ struct MainStudioView: View {
                 .foregroundStyle(.secondary)
         }
 
-        Button(role: .destructive) {
-            vm.showDisconnectConfirm = true
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "power")
-                    .font(.caption)
-                Text(vm.activeVMCount > 0
-                     ? L("释放全部实例 (\(vm.activeVMCount) 台运行中)", "Release All Instances (\(vm.activeVMCount) Running)")
-                     : L("释放全部实例", "Release All Instances"))
+        HStack(spacing: 6) {
+            Button(role: .destructive) {
+                vm.showDisconnectConfirm = true
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "power")
+                        .font(.caption)
+                    Text(vm.activeInstanceProfile?.endpoint.isEmpty == false
+                         ? L("释放当前实例", "Release Instance")
+                         : (vm.activeVMCount > 0
+                            ? L("释放实例 (\(vm.activeVMCount) 台)", "Release (\(vm.activeVMCount))")
+                            : L("释放实例", "Release Instance")))
+                }
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity)
+            .controlSize(.small)
+
+            if vm.activeVMCount > 1 {
+                Button(role: .destructive) {
+                    vm.showReleaseAllConfirm = true
+                } label: {
+                    Text(L("全部 (\(vm.activeVMCount))", "All (\(vm.activeVMCount))"))
+                }
+                .controlSize(.small)
+                .help(L("释放账号下全部运行中的 Colab 实例", "Terminate all active Colab instances under this account"))
+            }
         }
-        .controlSize(.small)
     }
 
     func metricColumn(title: String, value: String, highlight: Color) -> some View {
@@ -973,6 +1148,59 @@ struct MainStudioView: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.regular)
                         .disabled(!vm.isConnected || vm.comfyStarting)
+                    }
+                }
+
+                HStack {
+                    Text(L("H3 Toybox 创作台", "H3 Toybox"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(vm.toyboxRunning
+                         ? L("密码隧道在线", "Secured Online")
+                         : ((vm.toyboxStarting || vm.toyboxPreparingAssets) ? L("准备中...", "Busy...") : L("未启动", "Stopped")))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(vm.toyboxRunning ? Color.green : ((vm.toyboxStarting || vm.toyboxPreparingAssets) ? Color.orange : Color.secondary))
+                }
+                HStack(spacing: 6) {
+                    if vm.toyboxRunning && !vm.toyboxPublicURL.isEmpty {
+                        Button {
+                            vm.openToyboxInBrowser()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "lock.open.display")
+                                Text(L("打开 Toybox", "Open Toybox"))
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.regular)
+
+                        Button {
+                            Task { await vm.stopRemoteToybox(stopComfyToo: false) }
+                        } label: {
+                            Image(systemName: "stop.fill")
+                        }
+                        .controlSize(.regular)
+                        .help(L("保存素材库并停止 H3 Toybox 隧道", "Save library & stop H3 Toybox tunnel"))
+                    } else {
+                        Button {
+                            Task { await vm.startRemoteToybox(forceRestart: false, autoOpenBrowser: true) }
+                        } label: {
+                            HStack(spacing: 4) {
+                                if vm.toyboxStarting || vm.toyboxPreparingAssets {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "play.circle.fill")
+                                }
+                                Text(vm.toyboxStarting
+                                     ? L("启动隧道中...", "Starting...")
+                                     : L("拉起 H3 Toybox", "Launch Toybox"))
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.regular)
+                        .disabled(!vm.isConnected || vm.toyboxStarting || vm.toyboxPreparingAssets)
                     }
                 }
             }

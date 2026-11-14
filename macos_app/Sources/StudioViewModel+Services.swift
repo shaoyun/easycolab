@@ -180,6 +180,241 @@ extension StudioViewModel {
         }
     }
 
+    func reconcileCloudSessions(_ sessions: [BridgeSessionItem], pruneMissingCloudVMs: Bool = true) {
+        let now = Date()
+        var updated = managedInstances
+        let cloudByEp = Dictionary(uniqueKeysWithValues: sessions.map { ($0.endpoint, $0) })
+
+        for s in sessions {
+            let cleanURL = Self.normalizeServerURL(s.server_url ?? "")
+            // 若此前存在一条仅通过手动 URL 保存、但 URL 恰好匹配此云端实例的档案，自动合并其密码与元数据
+            if !cleanURL.isEmpty,
+               let manualIdx = updated.firstIndex(where: {
+                   $0.endpoint.isEmpty && Self.normalizeServerURL($0.serverURL) == cleanURL
+               }),
+               !updated.contains(where: { $0.endpoint == s.endpoint }) {
+                var merged = updated[manualIdx]
+                merged.id = s.endpoint
+                merged.endpoint = s.endpoint
+                merged.name = s.name
+                merged.accelerator = s.accelerator
+                merged.managed = s.managed ?? merged.managed
+                merged.isCloudOnline = true
+                merged.lastUpdatedAt = now
+                if activeInstanceID == updated[manualIdx].id {
+                    activeInstanceID = s.endpoint
+                }
+                updated[manualIdx] = merged
+                continue
+            }
+
+            if let idx = updated.firstIndex(where: { $0.endpoint == s.endpoint || $0.id == s.endpoint }) {
+                var item = updated[idx]
+                item.id = s.endpoint
+                item.endpoint = s.endpoint
+                item.name = s.name.isEmpty ? item.name : s.name
+                item.accelerator = s.accelerator
+                if let m = s.managed { item.managed = m }
+                if !cleanURL.isEmpty {
+                    item.serverURL = cleanURL
+                    if item.adminPassword.isEmpty {
+                        item.adminPassword = Self.savedAdminPassword(for: cleanURL)
+                    }
+                }
+                item.isCloudOnline = true
+                item.lastUpdatedAt = now
+                updated[idx] = item
+            } else {
+                let savedPw = cleanURL.isEmpty ? "" : Self.savedAdminPassword(for: cleanURL)
+                updated.append(
+                    ManagedInstanceProfile(
+                        id: s.endpoint,
+                        name: s.name,
+                        endpoint: s.endpoint,
+                        accelerator: s.accelerator,
+                        serverURL: cleanURL,
+                        adminPassword: savedPw,
+                        managed: s.managed ?? false,
+                        isCloudOnline: true,
+                        wsKeepaliveConnected: false,
+                        lastUpdatedAt: now
+                    )
+                )
+            }
+        }
+
+        if pruneMissingCloudVMs {
+            updated.removeAll { item in
+                !item.endpoint.isEmpty && cloudByEp[item.endpoint] == nil
+            }
+        } else {
+            for idx in updated.indices where !updated[idx].endpoint.isEmpty {
+                updated[idx].isCloudOnline = (cloudByEp[updated[idx].endpoint] != nil)
+            }
+        }
+
+        managedInstances = updated
+
+        // 同步 activeInstanceID：若当前选中的云端实例已消失，平滑切换到仍在线的实例或置空
+        if !activeInstanceID.isEmpty,
+           !managedInstances.contains(where: { $0.id == activeInstanceID }) {
+            if let fallback = managedInstances.first(where: { $0.isCloudOnline && !$0.serverURL.isEmpty }) ?? managedInstances.first {
+                activeInstanceID = fallback.id
+                suppressActiveInstanceSync = true
+                colabServerURL = fallback.serverURL
+                adminPassword = fallback.adminPassword
+                suppressActiveInstanceSync = false
+            } else {
+                activeInstanceID = ""
+                suppressActiveInstanceSync = true
+                colabServerURL = ""
+                adminPassword = ""
+                suppressActiveInstanceSync = false
+            }
+        } else if activeInstanceID.isEmpty,
+                  let preferred = managedInstances.first(where: { $0.isCloudOnline && !$0.serverURL.isEmpty }) ?? managedInstances.first {
+            activeInstanceID = preferred.id
+            if colabServerURL.isEmpty && !preferred.serverURL.isEmpty {
+                suppressActiveInstanceSync = true
+                colabServerURL = preferred.serverURL
+                adminPassword = preferred.adminPassword
+                suppressActiveInstanceSync = false
+            }
+        }
+    }
+
+    func selectInstance(_ instanceID: String) async {
+        guard let target = managedInstances.first(where: { $0.id == instanceID }) else { return }
+        syncCurrentFieldsToActiveInstance()
+
+        activeInstanceID = target.id
+        suppressActiveInstanceSync = true
+        colabServerURL = target.serverURL
+        adminPassword = target.adminPassword.isEmpty
+            ? Self.savedAdminPassword(for: target.serverURL)
+            : target.adminPassword
+        if ["G4", "H100", "A100", "L4", "T4"].contains(target.accelerator) {
+            wakeGPUChoice = target.accelerator
+        }
+        suppressActiveInstanceSync = false
+
+        resetStaleRemoteRuntimeState(reason: "", stopKeepalive: false)
+        if !target.serverURL.isEmpty && !adminPassword.isEmpty {
+            await checkColabStatus(silent: false)
+        } else if !target.serverURL.isEmpty {
+            statusMessage = L(
+                "已切换至实例 \(target.name) (\(target.accelerator))，请填写管理密码后点击「连接」。",
+                "Switched to instance \(target.name) (\(target.accelerator)). Enter management password and click 'Connect'."
+            )
+        } else if !target.endpoint.isEmpty {
+            statusMessage = L(
+                "已选中云端实例 \(target.name) (\(target.accelerator))；可点击菜单「探测服务」或「重部署」以连接。",
+                "Selected cloud instance \(target.name) (\(target.accelerator)); use menu 'Probe Service' or 'Redeploy' to connect."
+            )
+        }
+    }
+
+    func probeAndAdoptCloudInstance(_ endpoint: String) async {
+        guard cliLoggedIn, !endpoint.isEmpty else { return }
+        statusMessage = L(
+            "正在探测云端实例 \(String(endpoint.suffix(8))) 上的 EasyColab 服务...",
+            "Probing EasyColab service on cloud instance \(String(endpoint.suffix(8)))..."
+        )
+        let out = await runBridgeCommand(["probe_instance", "--endpoint", endpoint], installIfMissing: false)
+        guard let data = out.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(BridgeAuthStatusResponse.self, from: data),
+              decoded.ok == true else {
+            statusMessage = L(
+                "未能在该实例上检测到运行中的 EasyColab 服务（可能是普通 Notebook，可点「重部署」将其纳管）。",
+                "No running EasyColab service found on this instance (may be a plain Notebook; use 'Redeploy' to deploy)."
+            )
+            return
+        }
+        let url = Self.normalizeServerURL(decoded.server_url ?? "")
+        if let idx = managedInstances.firstIndex(where: { $0.endpoint == endpoint || $0.id == endpoint }) {
+            var copy = managedInstances[idx]
+            if let m = decoded.managed { copy.managed = m }
+            if !url.isEmpty {
+                copy.serverURL = url
+                if copy.adminPassword.isEmpty {
+                    copy.adminPassword = Self.savedAdminPassword(for: url)
+                }
+            }
+            managedInstances[idx] = copy
+        }
+        await selectInstance(endpoint)
+        if !url.isEmpty && adminPassword.isEmpty {
+            statusMessage = L(
+                "已探得服务地址，请填写该实例的网页管理密码后点击「连接」（或点重部署重新设置）。",
+                "Found server URL; enter its management password and click 'Connect' (or Redeploy to reset)."
+            )
+        }
+    }
+
+    func disconnectSingleInstance(_ endpoint: String) async {
+        guard cliLoggedIn, !endpoint.isEmpty else { return }
+        let target = managedInstances.first(where: { $0.endpoint == endpoint || $0.id == endpoint })
+        let wasActive = (activeInstanceID == endpoint) || (activeInstanceProfile?.endpoint == endpoint)
+
+        statusMessage = L(
+            "正在释放实例 \(target?.name ?? String(endpoint.suffix(8)))...",
+            "Releasing instance \(target?.name ?? String(endpoint.suffix(8)))..."
+        )
+
+        if let t = target, !t.serverURL.isEmpty {
+            let base = Self.normalizeServerURL(t.serverURL)
+            let pw = t.adminPassword.isEmpty ? Self.savedAdminPassword(for: base) : t.adminPassword
+            if !pw.isEmpty, let url = URL(string: "\(base)/minimax_api/disconnect") {
+                var req = URLRequest(url: url)
+                req.httpMethod = "POST"
+                req.timeoutInterval = 8
+                let encoded = Data("easycolab:\(pw)".utf8).base64EncodedString()
+                req.setValue("Basic " + encoded, forHTTPHeaderField: "Authorization")
+                _ = try? await adminSession.data(for: req)
+            }
+        }
+
+        let out = await runBridgeCommand(["stop_instance", "--endpoint", endpoint], installIfMissing: false)
+        if let data = out.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(BridgeAuthStatusResponse.self, from: data) {
+            officialCUBalance = decoded.paid_balance ?? officialCUBalance
+            officialBurnRate = decoded.burn_rate_hourly ?? officialBurnRate
+            activeVMCount = decoded.active_assignments ?? max(0, activeVMCount - 1)
+            if let sessions = decoded.sessions {
+                reconcileCloudSessions(sessions, pruneMissingCloudVMs: true)
+            } else {
+                managedInstances.removeAll { $0.endpoint == endpoint || $0.id == endpoint }
+            }
+            if let msg = decoded.message, !msg.isEmpty {
+                statusMessage = msg
+            }
+        } else {
+            managedInstances.removeAll { $0.endpoint == endpoint || $0.id == endpoint }
+            await refreshOfficialColabAccountUsage()
+        }
+
+        if wasActive {
+            if let nextInst = managedInstances.first(where: { $0.isCloudOnline && !$0.serverURL.isEmpty }) ?? managedInstances.first {
+                await selectInstance(nextInst.id)
+            } else {
+                suppressActiveInstanceSync = true
+                activeInstanceID = ""
+                colabServerURL = ""
+                adminPassword = ""
+                suppressActiveInstanceSync = false
+                resetStaleRemoteRuntimeState(reason: statusMessage)
+            }
+        }
+    }
+
+    func disconnectCurrentOrSelectedInstance() async {
+        if let inst = activeInstanceProfile, !inst.endpoint.isEmpty {
+            await disconnectSingleInstance(inst.endpoint)
+            return
+        }
+        await disconnectRemoteColab()
+    }
+
     func refreshOfficialColabAccountUsage() async {
         let out = await runBridgeCommand(["auth_status"], installIfMissing: false)
         guard let data = out.data(using: .utf8),
@@ -199,12 +434,16 @@ extension StudioViewModel {
         if let rate = decoded.burn_rate_hourly { officialBurnRate = rate }
         if let count = decoded.active_assignments {
             activeVMCount = count
-            if count == 0 && !isConnected && (!loadedModelsDetail.isEmpty || vramTotalGB > 0) {
-                resetStaleRemoteRuntimeState(reason: L(
-                    "云端 Colab 实例当前未运行，已自动清理历史显存状态；点击左侧「唤醒实例并部署」即可启动。",
-                    "No active cloud Colab runtime detected; cleared stale VRAM state. Click 'Wake & Deploy' on the left to launch."
-                ))
-            }
+        }
+        if cliLoggedIn, let sessions = decoded.sessions {
+            let canPrune = !sessions.isEmpty || (decoded.active_assignments ?? 0) == 0
+            reconcileCloudSessions(sessions, pruneMissingCloudVMs: canPrune)
+        }
+        if let count = decoded.active_assignments, count == 0 && !isConnected && (!loadedModelsDetail.isEmpty || vramTotalGB > 0) {
+            resetStaleRemoteRuntimeState(reason: L(
+                "云端 Colab 实例当前未运行，已自动清理历史显存状态；点击左侧「唤醒实例并部署」即可启动。",
+                "No active cloud Colab runtime detected; cleared stale VRAM state. Click 'Wake & Deploy' on the left to launch."
+            ))
         }
     }
 
@@ -238,6 +477,8 @@ extension StudioViewModel {
         officialCUBalance = nil
         officialBurnRate = nil
         activeVMCount = 0
+        managedInstances.removeAll { !$0.endpoint.isEmpty }
+        activeInstanceID = ""
         colabServerURL = ""
         resetStaleRemoteRuntimeState(reason: L(
             "已退出当前 Google 账号绑定；可点击左侧「绑定」登录其他账号。",
@@ -260,6 +501,8 @@ extension StudioViewModel {
         if decoded.logged_in == true {
             let newEmail = decoded.email ?? ""
             if wasLoggedIn && (prevEmail != newEmail || !colabServerURL.isEmpty) {
+                managedInstances.removeAll { !$0.endpoint.isEmpty }
+                activeInstanceID = ""
                 colabServerURL = ""
                 resetStaleRemoteRuntimeState(reason: "")
             }
@@ -272,6 +515,10 @@ extension StudioViewModel {
             activeVMCount = decoded.active_assignments ?? 0
             if let bal = decoded.paid_balance {
                 totalBudgetCU = bal
+            }
+            if let sessions = decoded.sessions {
+                let canPrune = !sessions.isEmpty || (decoded.active_assignments ?? 0) == 0
+                reconcileCloudSessions(sessions, pruneMissingCloudVMs: canPrune)
             }
             let emailTag = newEmail.isEmpty ? "" : " (\(displayAccountLabel))"
             statusMessage = L(
@@ -294,7 +541,50 @@ extension StudioViewModel {
     }
 
     func handleWakeOutputLine(_ line: String, gpu: String, password: String) {
-        if line.hasPrefix("WAKE_URL:") {
+        if line.hasPrefix("WAKE_INSTANCE:") {
+            let jsonPart = String(line.dropFirst("WAKE_INSTANCE:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let data = jsonPart.data(using: .utf8),
+               let ev = try? JSONDecoder().decode(BridgeWakeInstanceEvent.self, from: data) {
+                let cleanURL = Self.normalizeServerURL(ev.server_url)
+                suppressActiveInstanceSync = true
+                if let idx = managedInstances.firstIndex(where: { $0.endpoint == ev.endpoint || $0.id == ev.endpoint }) {
+                    var copy = managedInstances[idx]
+                    copy.name = ev.name
+                    copy.accelerator = ev.accelerator
+                    copy.serverURL = cleanURL
+                    copy.adminPassword = password
+                    copy.managed = true
+                    copy.isCloudOnline = true
+                    copy.lastUpdatedAt = Date()
+                    managedInstances[idx] = copy
+                } else {
+                    managedInstances.append(
+                        ManagedInstanceProfile(
+                            id: ev.endpoint,
+                            name: ev.name,
+                            endpoint: ev.endpoint,
+                            accelerator: ev.accelerator,
+                            serverURL: cleanURL,
+                            adminPassword: password,
+                            managed: true,
+                            isCloudOnline: true,
+                            wsKeepaliveConnected: false,
+                            lastUpdatedAt: Date()
+                        )
+                    )
+                }
+                activeInstanceID = ev.endpoint
+                colabServerURL = cleanURL
+                adminPassword = password
+                suppressActiveInstanceSync = false
+                if !cleanURL.isEmpty {
+                    var passwords = UserDefaults.standard.dictionary(forKey: "adminPasswordsByURL") as? [String: String] ?? [:]
+                    passwords[cleanURL] = password
+                    UserDefaults.standard.set(passwords, forKey: "adminPasswordsByURL")
+                }
+                self.wakeObtainedURLThisRun = true
+            }
+        } else if line.hasPrefix("WAKE_URL:") {
             let url = String(line.dropFirst("WAKE_URL:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
             self.colabServerURL = url
             self.adminPassword = password
@@ -323,7 +613,7 @@ extension StudioViewModel {
         }
     }
 
-    func wakeColabHeadless() async {
+    func wakeColabHeadless(mode: WakeLaunchMode = .auto, forceRedeploy: Bool = false) async {
         guard cliLoggedIn else {
             statusMessage = L("请先绑定 Google 账号后再使用免网页一键唤醒。", "Please bind your Google account before using headless 1-click wake.")
             return
@@ -332,13 +622,53 @@ extension StudioViewModel {
         stopKeepaliveDaemon()
         wakeObtainedURLThisRun = false
         isWakingColab = true
+
+        var targetGPU = self.wakeGPUChoice
+        var bridgeArgs = ["wake", "--gpu", targetGPU, "--app-py", self.appPyPath]
+        var password = UUID().uuidString + UUID().uuidString
+        var actionLabelZh = "免网页一键唤醒流程 (\(targetGPU) GPU)"
+        var actionLabelEn = "headless 1-click wake (\(targetGPU) GPU)"
+
+        switch mode {
+        case .newInstance:
+            bridgeArgs.append("--new")
+            actionLabelZh = "新建独立 \(targetGPU) 实例并部署"
+            actionLabelEn = "provision new \(targetGPU) instance"
+        case .redeployEndpoint(let ep):
+            if let existing = managedInstances.first(where: { $0.endpoint == ep || $0.id == ep }) {
+                if ["G4", "H100", "A100", "L4", "T4"].contains(existing.accelerator) {
+                    targetGPU = existing.accelerator
+                }
+                if !existing.adminPassword.isEmpty {
+                    password = existing.adminPassword
+                }
+            }
+            bridgeArgs = ["wake", "--gpu", targetGPU, "--endpoint", ep, "--app-py", self.appPyPath]
+            if forceRedeploy {
+                bridgeArgs.append("--force-redeploy")
+            }
+            actionLabelZh = "覆盖热重载实例 (\(targetGPU) · \(String(ep.suffix(8))))"
+            actionLabelEn = "redeploy instance (\(targetGPU) · \(String(ep.suffix(8))))"
+        case .auto:
+            // 若当前选中实例恰好是同型号在线托管实例且已有保存密码，沿用密码以启用代码哈希无感热复用
+            if let cur = activeInstanceProfile,
+               cur.isCloudOnline,
+               cur.accelerator == targetGPU,
+               !cur.adminPassword.isEmpty {
+                password = cur.adminPassword
+            }
+            if forceRedeploy {
+                bridgeArgs.append("--force-redeploy")
+            }
+        }
+
         statusMessage = L(
-            "正在通过 Google Colab API 后台分配 \(wakeGPUChoice) 实例并部署多模型引擎...",
-            "Provisioning \(wakeGPUChoice) runtime via Google Colab API & deploying multi-model engine..."
+            "正在执行 \(actionLabelZh)...",
+            "Running \(actionLabelEn)..."
         )
         liveConsoleLines = [L(
-            "[Colab-CLI] 正在启动免网页一键唤醒流程 (\(wakeGPUChoice) GPU)...",
-            "[Colab-CLI] Starting headless 1-click wake (\(wakeGPUChoice) GPU)..."
+            "[Colab-CLI] 正在启动 \(actionLabelZh)...",
+            "[Colab-CLI] Starting \(actionLabelEn)..."
         )]
 
         guard let pyBin = await ensureBridgePythonBin(installIfMissing: true) else {
@@ -346,17 +676,15 @@ extension StudioViewModel {
             return
         }
         let script = self.bridgeScript
-        let gpu = self.wakeGPUChoice
-        let password = UUID().uuidString + UUID().uuidString
+        let gpu = targetGPU
         let idleMin = self.idleTimeoutMinutes
-        let appPy = self.appPyPath
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pyBin)
         proc.environment = ProcessInfo.processInfo.environment.merging([
             "EASYCOLAB_ADMIN_PASSWORD": password,
             "EASYCOLAB_IDLE_TIMEOUT_MINUTES": "\(idleMin)"
         ]) { _, new in new }
-        proc.arguments = [script, "wake", "--gpu", gpu, "--app-py", appPy]
+        proc.arguments = [script] + bridgeArgs
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
@@ -440,7 +768,20 @@ extension StudioViewModel {
         if let logged = decoded.logged_in {
             cliLoggedIn = logged
         }
-        if let wsConn = decoded.ws_connected {
+        if let wsEndpoints = decoded.ws_endpoints {
+            for idx in managedInstances.indices {
+                let ep = managedInstances[idx].endpoint
+                if !ep.isEmpty, let epState = wsEndpoints[ep] {
+                    managedInstances[idx].wsKeepaliveConnected = epState
+                }
+            }
+            if let activeEp = activeInstanceProfile?.endpoint, !activeEp.isEmpty,
+               let activeState = wsEndpoints[activeEp] {
+                keepaliveProxyWSConnected = activeState
+            } else if let wsConn = decoded.ws_connected {
+                keepaliveProxyWSConnected = wsConn
+            }
+        } else if let wsConn = decoded.ws_connected {
             keepaliveProxyWSConnected = wsConn
         }
         if let bal = decoded.paid_balance {
@@ -756,10 +1097,32 @@ extension StudioViewModel {
                 comfyPresetPacks = packs
             }
         }
+        if let tb = decoded.toybox {
+            toyboxRunning = tb.is_running ?? false
+            toyboxStarting = tb.is_starting ?? false
+            toyboxPreparingAssets = tb.is_preparing_assets ?? false
+            toyboxProgress = tb.progress ?? 0.0
+            if let sm = tb.status_message, !sm.isEmpty {
+                toyboxStatusMessage = sm
+            }
+            toyboxPublicURL = tb.public_url ?? ""
+            toyboxPasswordProtected = tb.password_protected ?? true
+            toyboxNodesReady = tb.nodes_ready ?? 0
+            toyboxNodesTotal = tb.nodes_total ?? 3
+            toyboxCoreModelsReady = tb.core_models_ready ?? 0
+            toyboxCoreModelsTotal = tb.core_models_total ?? 12
+            toyboxRewriterReady = tb.rewriter_ready ?? false
+            toyboxImageReady = tb.image_ready ?? false
+        }
     }
 
     func openComfyUIInBrowser() {
         guard let url = URL(string: comfyPublicURL), !comfyPublicURL.isEmpty else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func openToyboxInBrowser() {
+        guard let url = URL(string: toyboxPublicURL), !toyboxPublicURL.isEmpty else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -1559,6 +1922,173 @@ extension StudioViewModel {
             statusMessage = L(
                 "一键配齐预置工作流包失败: \(error.localizedDescription)",
                 "Failed to install preset workflow pack: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    // MARK: - H3 Toybox 独立创作台 (复用底层 ComfyUI 引擎 + 带密码独立隧道)
+
+    func prepareRemoteToyboxAssets(autoStart: Bool = false) async {
+        let base = normalizedBaseURL
+        guard isConnected, !base.isEmpty, let url = URL(string: "\(base)/minimax_api/toybox/prepare") else {
+            statusMessage = L(
+                "请先在左侧唤醒或连接云端 GPU 实例后再配齐 H3 Toybox。",
+                "Please wake or connect to a cloud GPU instance before preparing H3 Toybox."
+            )
+            return
+        }
+        toyboxPreparingAssets = true
+        toyboxProgress = 0.04
+        let tip = L(
+            "正在配齐 H3 Toybox 源码、ComfyUI 专用节点与共享权重...",
+            "Preparing H3 Toybox source, ComfyUI nodes & shared weights..."
+        )
+        toyboxStatusMessage = tip
+        statusMessage = tip
+
+        do {
+            var req = try adminRequest(url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 30
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "include_rewriter": toyboxIncludeRewriter,
+                "include_image": toyboxIncludeImage,
+                "auto_start": autoStart,
+                "hf_token": hfToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            ])
+            let (data, resp) = try await adminSession.data(for: req)
+            if (resp as? HTTPURLResponse)?.statusCode == 404 {
+                toyboxPreparingAssets = false
+                let upgradeTip = L(
+                    "云端服务端尚未更新 H3 Toybox 接口，请点左侧「一键唤醒」热更新服务端后再试。",
+                    "The cloud server is running an older version without H3 Toybox routes. Re-wake to update."
+                )
+                toyboxStatusMessage = upgradeTip
+                statusMessage = upgradeTip
+                return
+            }
+            let decoded = try JSONDecoder().decode(ColabStatusResponse.self, from: data)
+            applyStatusResponse(decoded)
+
+            for _ in 0..<600 {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                await checkColabStatus(silent: true)
+                statusMessage = toyboxStatusMessage
+                if !toyboxPreparingAssets && !toyboxStarting {
+                    break
+                }
+            }
+            if autoStart && toyboxRunning && !toyboxPublicURL.isEmpty {
+                openToyboxInBrowser()
+            }
+        } catch {
+            toyboxPreparingAssets = false
+            statusMessage = L(
+                "配齐 H3 Toybox 节点与权重失败: \(error.localizedDescription)",
+                "Failed to prepare H3 Toybox assets: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    func startRemoteToybox(forceRestart: Bool = false, autoOpenBrowser: Bool = true) async {
+        let base = normalizedBaseURL
+        guard isConnected, !base.isEmpty, let url = URL(string: "\(base)/minimax_api/toybox/start") else {
+            statusMessage = L(
+                "请先在左侧唤醒或连接云端 GPU 实例。",
+                "Please wake or connect to a cloud GPU instance first."
+            )
+            return
+        }
+        if !forceRestart && toyboxRunning && !toyboxPublicURL.isEmpty {
+            if autoOpenBrowser { openToyboxInBrowser() }
+            return
+        }
+
+        toyboxStarting = true
+        toyboxProgress = 0.08
+        let tip = L(
+            "正在拉起 H3 Toybox 并开通带密码保护的独立 Cloudflare 隧道...",
+            "Starting H3 Toybox & opening password-protected Cloudflare tunnel..."
+        )
+        toyboxStatusMessage = tip
+        statusMessage = tip
+
+        do {
+            var req = try adminRequest(url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 30
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "unload_existing": toyboxUnloadOthersOnStart,
+                "force_restart": forceRestart,
+                "hf_token": hfToken.trimmingCharacters(in: .whitespacesAndNewlines),
+                "save_api_keys": false
+            ])
+            let (data, resp) = try await adminSession.data(for: req)
+            if (resp as? HTTPURLResponse)?.statusCode == 404 {
+                toyboxStarting = false
+                let upgradeTip = L(
+                    "云端服务端尚未更新 H3 Toybox 接口，请重新编译 Mac App (./dev.sh mac) 并热更新唤醒云端实例。",
+                    "Cloud server lacks H3 Toybox routes. Rebuild EasyColab.app (./dev.sh mac) and re-wake instance."
+                )
+                toyboxStatusMessage = upgradeTip
+                statusMessage = upgradeTip
+                return
+            }
+            let decoded = try JSONDecoder().decode(ColabStatusResponse.self, from: data)
+            applyStatusResponse(decoded)
+
+            for _ in 0..<180 {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                await checkColabStatus(silent: true)
+                statusMessage = toyboxStatusMessage
+                if toyboxRunning && !toyboxPublicURL.isEmpty && !toyboxStarting {
+                    statusMessage = L(
+                        "H3 Toybox 独立密码隧道已就绪！正在浏览器打开...",
+                        "H3 Toybox password-protected tunnel ready! Opening in browser..."
+                    )
+                    if autoOpenBrowser {
+                        openToyboxInBrowser()
+                    }
+                    return
+                }
+                if !toyboxStarting && !toyboxRunning {
+                    break
+                }
+            }
+        } catch {
+            toyboxStarting = false
+            statusMessage = L(
+                "启动 H3 Toybox 失败: \(error.localizedDescription)",
+                "Failed to start H3 Toybox: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    func stopRemoteToybox(stopComfyToo: Bool = false) async {
+        let base = normalizedBaseURL
+        guard isConnected, !base.isEmpty, let url = URL(string: "\(base)/minimax_api/toybox/stop") else { return }
+        statusMessage = L(
+            "正在保存 H3 Toybox 素材库并停止独立隧道...",
+            "Saving H3 Toybox library & stopping standalone tunnel..."
+        )
+        do {
+            var req = try adminRequest(url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 30
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "stop_comfyui_too": stopComfyToo
+            ])
+            let (data, _) = try await adminSession.data(for: req)
+            let decoded = try JSONDecoder().decode(ColabStatusResponse.self, from: data)
+            applyStatusResponse(decoded)
+            statusMessage = toyboxStatusMessage
+        } catch {
+            statusMessage = L(
+                "停止 H3 Toybox 失败: \(error.localizedDescription)",
+                "Failed to stop H3 Toybox: \(error.localizedDescription)"
             )
         }
     }

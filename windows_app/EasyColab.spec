@@ -73,6 +73,10 @@ for res_name in ("VERSION", "app.py", "runtime_auth.py", "colab_bridge.py", "Eas
     src = PROJECT_ROOT / res_name
     if src.exists():
         datas.append((str(src), "."))
+srv_pkg_dir = PROJECT_ROOT / "easycolab_server"
+if srv_pkg_dir.is_dir():
+    for pyf in sorted(srv_pkg_dir.glob("*.py")):
+        datas.append((str(pyf), "easycolab_server"))
 
 if ICON_PATH.exists():
     datas.append((str(ICON_PATH), "assets"))

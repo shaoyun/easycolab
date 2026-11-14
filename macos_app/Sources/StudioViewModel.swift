@@ -54,17 +54,130 @@ class StudioViewModel: ObservableObject {
         return raw
     }
 
-    private static func savedAdminPassword(for address: String) -> String {
+    static func savedAdminPassword(for address: String) -> String {
         let normalized = normalizeServerURL(address)
         guard !normalized.isEmpty else { return "" }
         let passwords = UserDefaults.standard.dictionary(forKey: "adminPasswordsByURL") as? [String: String]
         return passwords?[normalized] ?? passwords?[address] ?? ""
     }
 
+    let managedInstancesDefaultsKey = "easycolab.managedInstances.v1"
+    let activeInstanceIDDefaultsKey = "easycolab.activeInstanceID.v1"
+    var suppressActiveInstanceSync: Bool = false
+
+    @Published var managedInstances: [ManagedInstanceProfile] = [] {
+        didSet { savePersistedInstances() }
+    }
+
+    @Published var activeInstanceID: String = UserDefaults.standard.string(forKey: "easycolab.activeInstanceID.v1") ?? "" {
+        didSet { UserDefaults.standard.set(activeInstanceID, forKey: activeInstanceIDDefaultsKey) }
+    }
+
+    var activeInstanceProfile: ManagedInstanceProfile? {
+        if !activeInstanceID.isEmpty,
+           let match = managedInstances.first(where: { $0.id == activeInstanceID }) {
+            return match
+        }
+        let norm = normalizedBaseURL
+        if !norm.isEmpty {
+            return managedInstances.first(where: { Self.normalizeServerURL($0.serverURL) == norm })
+        }
+        return nil
+    }
+
+    var displayInstanceBadge: String {
+        if let inst = activeInstanceProfile {
+            return "\(inst.accelerator) · \(inst.shortEndpointLabel)"
+        }
+        return ""
+    }
+
+    func loadPersistedInstances() {
+        if let raw = UserDefaults.standard.data(forKey: managedInstancesDefaultsKey),
+           let decoded = try? JSONDecoder().decode([ManagedInstanceProfile].self, from: raw) {
+            managedInstances = decoded
+        } else {
+            let legacyURL = Self.normalizeServerURL(colabServerURL)
+            if !legacyURL.isEmpty {
+                let legacyPw = Self.savedAdminPassword(for: legacyURL)
+                let id = "manual:\(legacyURL)"
+                managedInstances = [
+                    ManagedInstanceProfile(
+                        id: id,
+                        name: "easycolab",
+                        endpoint: "",
+                        accelerator: "GPU",
+                        serverURL: legacyURL,
+                        adminPassword: legacyPw,
+                        managed: true,
+                        isCloudOnline: false,
+                        wsKeepaliveConnected: false,
+                        lastUpdatedAt: Date()
+                    )
+                ]
+                if activeInstanceID.isEmpty {
+                    activeInstanceID = id
+                }
+            }
+        }
+    }
+
+    func savePersistedInstances() {
+        if let encoded = try? JSONEncoder().encode(managedInstances) {
+            UserDefaults.standard.set(encoded, forKey: managedInstancesDefaultsKey)
+        }
+    }
+
+    func syncCurrentFieldsToActiveInstance() {
+        guard !suppressActiveInstanceSync else { return }
+        let norm = normalizedBaseURL
+        if let idx = managedInstances.firstIndex(where: { $0.id == activeInstanceID }) {
+            var copy = managedInstances[idx]
+            if copy.serverURL != colabServerURL || copy.adminPassword != adminPassword {
+                copy.serverURL = colabServerURL
+                copy.adminPassword = adminPassword
+                copy.lastUpdatedAt = Date()
+                managedInstances[idx] = copy
+            }
+            return
+        }
+        guard !norm.isEmpty else { return }
+        if let idx = managedInstances.firstIndex(where: { Self.normalizeServerURL($0.serverURL) == norm }) {
+            activeInstanceID = managedInstances[idx].id
+            var copy = managedInstances[idx]
+            copy.adminPassword = adminPassword
+            copy.lastUpdatedAt = Date()
+            managedInstances[idx] = copy
+            return
+        }
+        // 手动输入的未知 URL 自动沉淀为一个实例档案，方便多实例快速切换
+        if URL(string: norm)?.scheme?.hasPrefix("http") == true {
+            let manualId = "manual:\(norm)"
+            let hostTag = URL(string: norm)?.host?.split(separator: ".").first.map(String.init) ?? "notebook"
+            let profile = ManagedInstanceProfile(
+                id: manualId,
+                name: hostTag,
+                endpoint: "",
+                accelerator: "GPU",
+                serverURL: norm,
+                adminPassword: adminPassword,
+                managed: false,
+                isCloudOnline: true,
+                wsKeepaliveConnected: false,
+                lastUpdatedAt: Date()
+            )
+            managedInstances.append(profile)
+            activeInstanceID = manualId
+        }
+    }
+
     @Published var colabServerURL: String = UserDefaults.standard.string(forKey: "colabServerURL") ?? "" {
         didSet {
-            if Self.normalizeServerURL(oldValue) != Self.normalizeServerURL(colabServerURL) {
-                adminPassword = Self.savedAdminPassword(for: colabServerURL)
+            if !suppressActiveInstanceSync && Self.normalizeServerURL(oldValue) != Self.normalizeServerURL(colabServerURL) {
+                let saved = Self.savedAdminPassword(for: colabServerURL)
+                if !saved.isEmpty || Self.normalizeServerURL(colabServerURL).isEmpty {
+                    adminPassword = saved
+                }
                 remoteApiKeySynced = false
                 remoteIdleSynced = false
                 remoteContextSynced = false
@@ -72,6 +185,7 @@ class StudioViewModel: ObservableObject {
                 lastContextSyncAttemptAt = .distantPast
             }
             UserDefaults.standard.set(colabServerURL, forKey: "colabServerURL")
+            syncCurrentFieldsToActiveInstance()
         }
     }
 
@@ -80,13 +194,15 @@ class StudioViewModel: ObservableObject {
     ) {
         didSet {
             let key = normalizedBaseURL
-            guard !key.isEmpty, adminPassword != Self.savedAdminPassword(for: key) else { return }
-            var passwords = UserDefaults.standard.dictionary(forKey: "adminPasswordsByURL") as? [String: String] ?? [:]
-            passwords[key] = adminPassword.isEmpty ? nil : adminPassword
-            if colabServerURL != key {
-                passwords.removeValue(forKey: colabServerURL)
+            if !key.isEmpty, adminPassword != Self.savedAdminPassword(for: key) {
+                var passwords = UserDefaults.standard.dictionary(forKey: "adminPasswordsByURL") as? [String: String] ?? [:]
+                passwords[key] = adminPassword.isEmpty ? nil : adminPassword
+                if colabServerURL != key {
+                    passwords.removeValue(forKey: colabServerURL)
+                }
+                UserDefaults.standard.set(passwords, forKey: "adminPasswordsByURL")
             }
-            UserDefaults.standard.set(passwords, forKey: "adminPasswordsByURL")
+            syncCurrentFieldsToActiveInstance()
         }
     }
     @Published var hfToken: String = UserDefaults.standard.string(forKey: "hfToken") ?? "" {
@@ -100,6 +216,8 @@ class StudioViewModel: ObservableObject {
     static let defaultModelNameEn = "Not Loaded"
     static let defaultComfyStatusZh = "尚未启动云端 ComfyUI 工作台"
     static let defaultComfyStatusEn = "Cloud ComfyUI Studio Not Started"
+    static let defaultToyboxStatusZh = "尚未启动（复用底层 ComfyUI 引擎 + 独立带密码公网隧道）"
+    static let defaultToyboxStatusEn = "Not started (shares underlying ComfyUI engine + password-protected tunnel)"
     static let defaultComfyPersistZh = "Google Drive 自动软链持久化"
     static let defaultComfyPersistEn = "Google Drive Auto-Symlink Persistence"
     static let defaultReadyStatusZh = "就绪：默认已选 G4 (RTX PRO 6000 · 96GB)，可在左侧一键唤醒实例并部署模型。"
@@ -258,6 +376,26 @@ class StudioViewModel: ObservableObject {
     @Published var comfyWeightSourceInput: String = ""
     @Published var comfyWeightFilenameInput: String = ""
     @Published var comfyWeightSubfolder: String = "diffusion_models"
+
+    // H3 Toybox 独立 Web 创作台（复用底层 ComfyUI 引擎 + 带密码独立公网隧道）
+    @Published var toyboxRunning: Bool = false
+    @Published var toyboxStarting: Bool = false
+    @Published var toyboxPreparingAssets: Bool = false
+    @Published var toyboxProgress: Double = 0.0
+    @Published var toyboxStatusMessage: String = L(StudioViewModel.defaultToyboxStatusZh, StudioViewModel.defaultToyboxStatusEn) {
+        didSet { let c = stripEmoji(toyboxStatusMessage); if c != toyboxStatusMessage { toyboxStatusMessage = c } }
+    }
+    @Published var toyboxPublicURL: String = ""
+    @Published var toyboxPasswordProtected: Bool = true
+    @Published var toyboxNodesReady: Int = 0
+    @Published var toyboxNodesTotal: Int = 3
+    @Published var toyboxCoreModelsReady: Int = 0
+    @Published var toyboxCoreModelsTotal: Int = 12
+    @Published var toyboxRewriterReady: Bool = false
+    @Published var toyboxImageReady: Bool = false
+    @Published var toyboxIncludeRewriter: Bool = true
+    @Published var toyboxIncludeImage: Bool = true
+    @Published var toyboxUnloadOthersOnStart: Bool = true
     @Published var comfyPullingOutputRelPath: String? = nil
     @Published var modelTaskProgress: Double = 0.0
 
@@ -662,6 +800,7 @@ class StudioViewModel: ObservableObject {
     var displayCurrentModelName: String { localizeServerText(currentModelName) }
     var displayComfyStatusMessage: String { localizeServerText(comfyStatusMessage) }
     var displayComfyPersistenceLabel: String { localizeServerText(comfyPersistenceLabel) }
+    var displayToyboxStatusMessage: String { localizeServerText(toyboxStatusMessage) }
     var displayStatusMessage: String { localizeServerText(statusMessage) }
 
     // 多媒体预览与本地历史记录
@@ -672,6 +811,7 @@ class StudioViewModel: ObservableObject {
     @Published var showColabGuideSheet: Bool = false
     @Published var guideInitialStep: Int = 0
     @Published var showDisconnectConfirm: Bool = false
+    @Published var showReleaseAllConfirm: Bool = false
 
     var languageObserver: NSObjectProtocol? = nil
 
@@ -689,6 +829,9 @@ class StudioViewModel: ObservableObject {
         }
         if comfyStatusMessage == Self.defaultComfyStatusZh || comfyStatusMessage == Self.defaultComfyStatusEn {
             comfyStatusMessage = isEN ? Self.defaultComfyStatusEn : Self.defaultComfyStatusZh
+        }
+        if toyboxStatusMessage == Self.defaultToyboxStatusZh || toyboxStatusMessage == Self.defaultToyboxStatusEn {
+            toyboxStatusMessage = isEN ? Self.defaultToyboxStatusEn : Self.defaultToyboxStatusZh
         }
         if comfyPersistenceLabel == Self.defaultComfyPersistZh || comfyPersistenceLabel == Self.defaultComfyPersistEn {
             comfyPersistenceLabel = isEN ? Self.defaultComfyPersistEn : Self.defaultComfyPersistZh
@@ -852,7 +995,7 @@ class StudioViewModel: ObservableObject {
         generationStartedAt = nil
     }
 
-    func resetStaleRemoteRuntimeState(reason: String) {
+    func resetStaleRemoteRuntimeState(reason: String, stopKeepalive: Bool = true) {
         let hadActiveState = isConnected
             || !loadedModelsDetail.isEmpty
             || !loadedModelIds.isEmpty
@@ -862,7 +1005,9 @@ class StudioViewModel: ObservableObject {
             || isDownloadingWeights
             || vramTotalGB > 0
 
-        stopKeepaliveDaemon()
+        if stopKeepalive {
+            stopKeepaliveDaemon()
+        }
         stopLiveGenerationTimer()
         isConnected = false
         modelLoaded = false
@@ -881,6 +1026,16 @@ class StudioViewModel: ObservableObject {
         comfyPublicURL = ""
         comfyQueueRunning = 0
         comfyQueuePending = 0
+        toyboxRunning = false
+        toyboxStarting = false
+        toyboxPreparingAssets = false
+        toyboxProgress = 0.0
+        toyboxPublicURL = ""
+        toyboxNodesReady = 0
+        toyboxCoreModelsReady = 0
+        toyboxRewriterReady = false
+        toyboxImageReady = false
+        toyboxStatusMessage = L(Self.defaultToyboxStatusZh, Self.defaultToyboxStatusEn)
         progressValue = 0.0
         modelTaskProgress = 0.0
         vramUsedGB = 0.0
@@ -997,6 +1152,7 @@ class StudioViewModel: ObservableObject {
     let customModelsDefaultsKey = "easycolab.macos.custom_models.v1"
 
     init() {
+        loadPersistedInstances()
         loadPersistedCustomModels()
         refreshLocalMedia()
         startBackgroundTelemetryLoop()
@@ -1959,38 +2115,20 @@ class StudioViewModel: ObservableObject {
             )
         }
 
-        stopKeepaliveDaemon()
-        stopLiveGenerationTimer()
-        isConnected = false
-        modelLoaded = false
-        loadedModelId = nil
-        loadedModelIds = []
-        loadedModelsDetail = []
-        loadedContextLengthTokens = 0
-        ramTotalGB = 0.0
-        ramUsedGB = 0.0
-        ramFreeGB = 0.0
-        diskTotalGB = 0.0
-        diskUsedGB = 0.0
-        diskFreeGB = 0.0
-        shmTotalGB = 0.0
-        shmUsedGB = 0.0
-        shmFreeGB = 0.0
-        driveTotalGB = 0.0
-        driveUsedGB = 0.0
-        driveFreeGB = 0.0
-        vramHistoryPct = []
-        ramHistoryPct = []
-        diskHistoryPct = []
-        lastTelemetrySampleDate = .distantPast
-        remoteContextSynced = false
-        remoteIdleSynced = false
-        remoteApiKeySynced = false
-        lastIdleSyncAttemptAt = .distantPast
-        lastContextSyncAttemptAt = .distantPast
+        managedInstances.removeAll { !$0.endpoint.isEmpty }
+        if !activeInstanceID.isEmpty, !managedInstances.contains(where: { $0.id == activeInstanceID }) {
+            suppressActiveInstanceSync = true
+            activeInstanceID = ""
+            colabServerURL = ""
+            adminPassword = ""
+            suppressActiveInstanceSync = false
+        }
+
+        let finalMsg = statusMessage
+        resetStaleRemoteRuntimeState(reason: "")
+        statusMessage = finalMsg
         uptimeSeconds = 0
         cuBurnRatePerHour = 0.0
-        syncMacOSRuntimeActivityAssertion()
     }
 
     func encodeImageToBase64(_ image: NSImage) -> String? {

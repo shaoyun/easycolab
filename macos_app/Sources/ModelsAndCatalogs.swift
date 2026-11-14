@@ -720,6 +720,7 @@ struct ColabStatusResponse: Codable {
     var drive_used_gb: Double?
     var drive_free_gb: Double?
     var comfyui: ComfyRemoteStatus?
+    var toybox: ToyboxRemoteStatus?
     var custom_models: [CustomHFModelDTO]?
     var registered_model: CustomHFModelDTO?
     var action_ok: Bool?
@@ -758,6 +759,8 @@ struct ComfyPresetPackItem: Codable, Identifiable, Hashable {
             return "LTX-2.3 (22B) · Cinematic Camera Motion First/Last Frame + Audio"
         case "hunyuan15_i2v_1080p":
             return "HunyuanVideo 1.5 · Single-Image Direct 1080P Super-Res Workflow"
+        case "minimax_h3_toybox":
+            return "H3 Toybox Studio · Ref2VA / FL2VA / Extend / P-H3 Image"
         default:
             return localizeServerText(title)
         }
@@ -774,6 +777,8 @@ struct ComfyPresetPackItem: Codable, Identifiable, Hashable {
             return "Cinematic Camera · Only 2 Weights"
         case "hunyuan15_i2v_1080p":
             return "720P + 1080P Dual Output"
+        case "minimax_h3_toybox":
+            return "Standalone Web UI · Shared Comfy Engine"
         default:
             return localizeServerText(badge)
         }
@@ -790,6 +795,8 @@ struct ComfyPresetPackItem: Codable, Identifiable, Hashable {
             return "Optimized for dramatic camera moves between start & end keyframes (e.g. aerial crane dive to low-angle close-up + synthesized soundtrack)"
         case "hunyuan15_i2v_1080p":
             return "Latent super-resolution pipeline enabled by default — upload 1 image to render both 720P base video and 1920×1080 Full HD output"
+        case "minimax_h3_toybox":
+            return "Reuses shared Qwen3-VL / H3 VAE base weights and installs PRISM, Semantic Bridge, SelfLift, Motion Context & P-H3 Image"
         default:
             return localizeServerText(scenario)
         }
@@ -804,7 +811,8 @@ struct ComfyPresetPackItem: Codable, Identifiable, Hashable {
             "03_MiniMax-H3_极速图生有声视频(单图带立体声)": "03_MiniMax-H3_Fast_I2VA_Stereo",
             "04_MiniMax-H3_首尾帧有声过渡(双图带立体声)": "04_MiniMax-H3_FirstLastFrame_Stereo",
             "05_LTX-2.3_首尾帧电影运镜(双图极速带音效)": "05_LTX-2.3_Cinematic_FLF2V_Audio",
-            "06_Hunyuan1.5_单图直出1080P超清视频": "06_Hunyuan1.5_Direct_1080P_I2V"
+            "06_Hunyuan1.5_单图直出1080P超清视频": "06_Hunyuan1.5_Direct_1080P_I2V",
+            "07_MiniMax-H3_Toybox标准全功能工作流(WF)": "07_MiniMax-H3_Toybox_Full_WF"
         ]
         return map[stripped] ?? stripped
     }
@@ -868,8 +876,45 @@ let DEFAULT_COMFY_PRESET_PACKS: [ComfyPresetPackItem] = [
         total_models: 7,
         workflows_installed: false,
         ready: false
+    ),
+    ComfyPresetPackItem(
+        id: "minimax_h3_toybox",
+        title: "H3 Toybox 全能创作台 · Ref2VA / 首尾帧 / 延伸 / P-H3 生图",
+        badge: "独立Web创作台 · 共用Comfy引擎",
+        scenario: "复用 Qwen3-VL / H3 VAE 共享底座，补齐 PRISM 主模型、语义桥、SelfLift、延伸气锁与 P-H3 生图套件",
+        approx_size_gb: 54.4,
+        workflows: [
+            "07_MiniMax-H3_Toybox标准全功能工作流(WF).json"
+        ],
+        installed_models: 0,
+        total_models: 16,
+        workflows_installed: false,
+        ready: false
     )
 ]
+
+struct ToyboxRemoteStatus: Codable {
+    var is_running: Bool?
+    var is_starting: Bool?
+    var is_preparing_assets: Bool?
+    var progress: Double?
+    var status_message: String?
+    var public_url: String?
+    var local_port: Int?
+    var ingress_port: Int?
+    var password_protected: Bool?
+    var repo_installed: Bool?
+    var nodes_ready: Int?
+    var nodes_total: Int?
+    var core_models_ready: Int?
+    var core_models_total: Int?
+    var rewriter_ready: Bool?
+    var image_ready: Bool?
+    var data_dir: String?
+    var persistence_label: String?
+    var comfyui_running: Bool?
+    var comfyui_public_url: String?
+}
 
 struct ComfyRemoteStatus: Codable {
     var is_running: Bool?
@@ -945,17 +990,76 @@ struct ColabJobResponse: Codable {
     var telemetry: LiveTelemetrySnapshot?
 }
 
+struct BridgeSessionItem: Codable, Identifiable, Hashable {
+    var id: String { endpoint }
+    var name: String
+    var endpoint: String
+    var accelerator: String
+    var variant: String?
+    var shape: String?
+    var managed: Bool?
+    var server_url: String?
+    var bundle_hash: String?
+}
+
+struct BridgeWakeInstanceEvent: Codable {
+    var endpoint: String
+    var name: String
+    var accelerator: String
+    var server_url: String
+    var reused: Bool?
+    var skipped_reload: Bool?
+    var bundle_hash: String?
+}
+
 struct BridgeAuthStatusResponse: Codable {
     var ok: Bool?
     var logged_in: Bool?
     var ws_connected: Bool?
+    var ws_endpoints: [String: Bool]?
     var email: String?
     var paid_balance: Double?
     var burn_rate_hourly: Double?
     var active_assignments: Int?
+    var sessions: [BridgeSessionItem]?
+    var released_endpoint: String?
+    var endpoint: String?
+    var server_url: String?
+    var running: Bool?
+    var managed: Bool?
     var message: String?
     var warning: String?
     var error: String?
+}
+
+struct ManagedInstanceProfile: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String
+    var endpoint: String
+    var accelerator: String
+    var serverURL: String
+    var adminPassword: String
+    var managed: Bool
+    var isCloudOnline: Bool
+    var wsKeepaliveConnected: Bool
+    var lastUpdatedAt: Date
+
+    var shortEndpointLabel: String {
+        let ep = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !ep.isEmpty {
+            return String(ep.suffix(8))
+        }
+        if let u = URL(string: serverURL), let host = u.host {
+            return String(host.prefix(12))
+        }
+        return id
+    }
+}
+
+enum WakeLaunchMode: Equatable {
+    case auto
+    case newInstance
+    case redeployEndpoint(String)
 }
 
 struct LocalMediaItem: Identifiable, Hashable {

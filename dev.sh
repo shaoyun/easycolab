@@ -56,6 +56,11 @@ case "${MODE}" in
                     cp -f "${PROJECT_ROOT}/${res_file}" "${RESOURCES_DIR}/${res_file}"
                 fi
             done
+            if [ -d "${PROJECT_ROOT}/easycolab_server" ]; then
+                rm -rf "${RESOURCES_DIR}/easycolab_server"
+                mkdir -p "${RESOURCES_DIR}/easycolab_server"
+                cp -f "${PROJECT_ROOT}/easycolab_server"/*.py "${RESOURCES_DIR}/easycolab_server/"
+            fi
             ARCH="$(uname -m)"
             echo "⚡ 正在极速编译 macOS 客户端 (${ARCH}, Debug -Onone，跳过图标生成与 zip 打包)..."
             swiftc -Onone \

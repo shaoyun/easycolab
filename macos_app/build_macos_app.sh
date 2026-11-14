@@ -28,6 +28,11 @@ for res_file in "VERSION" "app.py" "runtime_auth.py" "colab_bridge.py" "EasyCola
         cp -f "${PROJECT_ROOT}/${res_file}" "${RESOURCES_DIR}/${res_file}"
     fi
 done
+if [ -d "${PROJECT_ROOT}/easycolab_server" ]; then
+    rm -rf "${RESOURCES_DIR}/easycolab_server"
+    mkdir -p "${RESOURCES_DIR}/easycolab_server"
+    cp -f "${PROJECT_ROOT}/easycolab_server"/*.py "${RESOURCES_DIR}/easycolab_server/"
+fi
 
 # 1. 生成 Info.plist
 cat > "${CONTENTS_DIR}/Info.plist" <<EOF

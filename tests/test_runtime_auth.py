@@ -9,7 +9,15 @@ import shutil
 import threading
 import unittest
 
-from runtime_auth import authenticated_ingress, COMFY_BACKEND, COMFY_INGRESS, GRADIO_BACKEND, GRADIO_INGRESS
+from runtime_auth import (
+    authenticated_ingress,
+    COMFY_BACKEND,
+    COMFY_INGRESS,
+    GRADIO_BACKEND,
+    GRADIO_INGRESS,
+    TOYBOX_BACKEND,
+    TOYBOX_INGRESS,
+)
 
 
 class Backend(BaseHTTPRequestHandler):
@@ -36,7 +44,7 @@ class IngressTest(unittest.TestCase):
     def setUpClass(cls):
         cls.stack = contextlib.ExitStack()
         cls.addClassCleanup(cls.stack.close)
-        for port in (GRADIO_BACKEND, COMFY_BACKEND):
+        for port in (GRADIO_BACKEND, COMFY_BACKEND, TOYBOX_BACKEND):
             server = cls.stack.enter_context(ThreadingHTTPServer(("127.0.0.1", port), Backend))
             threading.Thread(target=server.serve_forever, daemon=True).start()
             cls.stack.callback(server.shutdown)
@@ -70,6 +78,11 @@ class IngressTest(unittest.TestCase):
         headers.update(Origin="https://studio.example", Host="studio.example")
         self.assertEqual(self.request(COMFY_INGRESS, "/ws", headers)[0], 101)
         self.assertEqual(self.request(COMFY_INGRESS, "/prompt", method="POST")[0], 401)
+        self.assertEqual(self.request(TOYBOX_INGRESS, "/api/config")[0], 401)
+        self.assertEqual(
+            self.request(TOYBOX_INGRESS, "/api/config", {"Authorization": self.basic}),
+            (200, b"no credential"),
+        )
 
     def test_only_inference_paths_pass_credentials_to_the_gateway(self):
         bearer = "Bearer inference-key"

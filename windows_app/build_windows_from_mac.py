@@ -353,6 +353,14 @@ def copy_app_sources_and_resources() -> None:
         res_src = REPO_ROOT / res_name
         if res_src.is_file():
             shutil.copy2(res_src, INTERNAL_DIR / res_name)
+    srv_src_dir = REPO_ROOT / "easycolab_server"
+    if srv_src_dir.is_dir():
+        srv_dst_dir = INTERNAL_DIR / "easycolab_server"
+        if srv_dst_dir.exists():
+            shutil.rmtree(srv_dst_dir, ignore_errors=True)
+        srv_dst_dir.mkdir(parents=True, exist_ok=True)
+        for pyf in srv_src_dir.glob("*.py"):
+            shutil.copy2(pyf, srv_dst_dir / pyf.name)
 
     # Copy windows_app package
     dst_pkg = INTERNAL_DIR / "windows_app"
