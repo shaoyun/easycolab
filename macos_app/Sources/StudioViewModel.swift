@@ -267,6 +267,33 @@ class StudioViewModel: ObservableObject {
     // 任务模式与生成参数
     static let maxRef2VAImages: Int = 9
     static let maxRef2VAVideos: Int = 3
+    static let maxRef2VAAudios: Int = 3
+
+    struct Ref2VAMentionCandidate: Identifiable {
+        let id: String
+        let tag: String
+        let modality: String // "image" | "video" | "audio"
+        let index: Int
+        let filename: String
+        let thumbnail: NSImage?
+        let isUploaded: Bool
+
+        var iconName: String {
+            switch modality {
+            case "video": return "film.stack.fill"
+            case "audio": return "waveform.circle.fill"
+            default: return "photo.fill"
+            }
+        }
+
+        var aliasLabel: String {
+            switch modality {
+            case "video": return L("@视频\(index)", "@Video\(index)")
+            case "audio": return L("@音频\(index)", "@Audio\(index)")
+            default: return L("@图片\(index)", "@Pic\(index)")
+            }
+        }
+    }
 
     @Published var taskModeId: String = "t2va"
     @Published var visualPrompt: String = PRESET_TEMPLATES[0].visual
@@ -276,7 +303,9 @@ class StudioViewModel: ObservableObject {
     @Published var firstFrameImage: NSImage? = nil
     @Published var lastFrameImage: NSImage? = nil
     @Published var ref2vaImages: [NSImage] = []
+    @Published var ref2vaImageNames: [String] = []
     @Published var ref2vaVideoURLs: [URL] = []
+    @Published var ref2vaAudioURLs: [URL] = []
 
     var effectiveRef2VAImages: [NSImage] {
         if !ref2vaImages.isEmpty {
@@ -285,20 +314,40 @@ class StudioViewModel: ObservableObject {
         return [firstFrameImage, lastFrameImage].compactMap { $0 }
     }
 
-    func addRef2VAImages(_ newImages: [NSImage]) {
-        for img in newImages {
+    func addRef2VAImageURLs(_ urls: [URL]) {
+        for url in urls {
+            guard ref2vaImages.count < Self.maxRef2VAImages else { break }
+            if let img = NSImage(contentsOf: url) {
+                ref2vaImages.append(img)
+                ref2vaImageNames.append(url.lastPathComponent)
+            }
+        }
+    }
+
+    func addRef2VAImages(_ newImages: [NSImage], names: [String] = []) {
+        for (idx, img) in newImages.enumerated() {
             guard ref2vaImages.count < Self.maxRef2VAImages else { break }
             ref2vaImages.append(img)
+            let fallbackName = L("参考图_\(ref2vaImages.count).png", "RefImage_\(ref2vaImages.count).png")
+            let name = idx < names.count && !names[idx].isEmpty ? names[idx] : fallbackName
+            ref2vaImageNames.append(name)
         }
     }
 
     func removeRef2VAImage(at index: Int) {
         guard ref2vaImages.indices.contains(index) else { return }
+        let removedOneBased = index + 1
         ref2vaImages.remove(at: index)
+        if ref2vaImageNames.indices.contains(index) {
+            ref2vaImageNames.remove(at: index)
+        }
+        syncPromptTagsAfterAssetRemoval(prefix: "Picture", removedOneBasedIndex: removedOneBased, maxIndex: Self.maxRef2VAImages)
+        syncPromptTagsAfterAssetRemoval(prefix: "Subject", removedOneBasedIndex: removedOneBased, maxIndex: Self.maxRef2VAImages)
     }
 
     func clearRef2VAImages() {
         ref2vaImages.removeAll()
+        ref2vaImageNames.removeAll()
         if taskModeId == "ref2va" {
             firstFrameImage = nil
             lastFrameImage = nil
@@ -316,20 +365,204 @@ class StudioViewModel: ObservableObject {
 
     func removeRef2VAVideo(at index: Int) {
         guard ref2vaVideoURLs.indices.contains(index) else { return }
+        let removedOneBased = index + 1
         ref2vaVideoURLs.remove(at: index)
+        syncPromptTagsAfterAssetRemoval(prefix: "Video", removedOneBasedIndex: removedOneBased, maxIndex: Self.maxRef2VAVideos)
     }
 
     func clearRef2VAVideos() {
         ref2vaVideoURLs.removeAll()
     }
 
+    func addRef2VAAudios(_ urls: [URL]) {
+        for u in urls {
+            guard ref2vaAudioURLs.count < Self.maxRef2VAAudios else { break }
+            if !ref2vaAudioURLs.contains(u) {
+                ref2vaAudioURLs.append(u)
+            }
+        }
+    }
+
+    func removeRef2VAAudio(at index: Int) {
+        guard ref2vaAudioURLs.indices.contains(index) else { return }
+        let removedOneBased = index + 1
+        ref2vaAudioURLs.remove(at: index)
+        syncPromptTagsAfterAssetRemoval(prefix: "Audio", removedOneBasedIndex: removedOneBased, maxIndex: Self.maxRef2VAAudios)
+    }
+
+    func clearRef2VAAudios() {
+        ref2vaAudioURLs.removeAll()
+    }
+
+    /// 当用户删除某个序号的参考资产时，自动将提示词中后续的 <Picture k> / <Video k> / <Audio k> 顺序号前移 -1，保持提示词与剩余资产严格对应
+    private func syncPromptTagsAfterAssetRemoval(prefix: String, removedOneBasedIndex: Int, maxIndex: Int) {
+        func shiftTags(in text: String) -> String {
+            guard !text.isEmpty else { return text }
+            var updated = text
+            let removedTag = "<\(prefix) \(removedOneBasedIndex)>"
+            if updated.contains(removedTag) {
+                updated = updated.replacingOccurrences(of: removedTag + " ", with: "")
+                updated = updated.replacingOccurrences(of: removedTag, with: "")
+            }
+            if removedOneBasedIndex < maxIndex {
+                for idx in (removedOneBasedIndex + 1)...maxIndex {
+                    let oldTag = "<\(prefix) \(idx)>"
+                    let newTag = "<\(prefix) \(idx - 1)>"
+                    if updated.contains(oldTag) {
+                        updated = updated.replacingOccurrences(of: oldTag, with: newTag)
+                    }
+                }
+            }
+            return updated
+        }
+        visualPrompt = shiftTags(in: visualPrompt)
+        soundscapePrompt = shiftTags(in: soundscapePrompt)
+        musicPrompt = shiftTags(in: musicPrompt)
+    }
+
     func insertReferenceTagIntoPrompt(_ tag: String) {
+        if activeAtMentionQuery(in: visualPrompt) != nil {
+            visualPrompt = replaceActiveAtMention(in: visualPrompt, with: tag)
+            return
+        }
         let trimmed = visualPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             visualPrompt = tag + " "
-        } else if !visualPrompt.contains(tag) {
-            visualPrompt = visualPrompt + (visualPrompt.hasSuffix(" ") ? "" : " ") + tag
+        } else {
+            visualPrompt = visualPrompt + (visualPrompt.hasSuffix(" ") ? "" : " ") + tag + " "
         }
+    }
+
+    /// 检测提示词中是否包含正在输入的 `@` 触发词（例如 `@`、`@图`、`@视频`、`@音`、`@pic`、`@vid`、`@aud`、`@1`）
+    func activeAtMentionQuery(in text: String) -> String? {
+        guard let atIdx = text.lastIndex(of: "@") else { return nil }
+        let afterAt = text[text.index(after: atIdx)...]
+        // 若 @ 后面已经遇到空格、换行或闭合尖括号，则视为已完成普通输入，不再弹出菜单
+        if afterAt.contains(where: { $0.isWhitespace || $0 == "<" || $0 == ">" }) {
+            return nil
+        }
+        return String(afterAt)
+    }
+
+    /// 将提示词中的活跃 `@...` 触发片段替换为选中的 `<Picture N>` / `<Video N>` / `<Audio N>` 标签
+    func replaceActiveAtMention(in text: String, with tag: String) -> String {
+        guard let atIdx = text.lastIndex(of: "@") else {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? (tag + " ") : (text + (text.hasSuffix(" ") ? "" : " ") + tag + " ")
+        }
+        let afterAt = text[text.index(after: atIdx)...]
+        if let endRel = afterAt.firstIndex(where: { $0.isWhitespace || $0 == "<" || $0 == ">" }) {
+            let prefix = text[..<atIdx]
+            let suffix = text[endRel...]
+            return String(prefix) + tag + String(suffix)
+        } else {
+            let prefix = text[..<atIdx]
+            return String(prefix) + tag + " "
+        }
+    }
+
+    /// 构建供 `@` 触发选择器展示的图片 / 视频 / 音频参考资产列表（与当前上传顺序严格 1:1 对应）
+    func ref2vaMentionCandidates(matching query: String = "") -> [Ref2VAMentionCandidate] {
+        var items: [Ref2VAMentionCandidate] = []
+        let imgs = effectiveRef2VAImages
+        for (idx, img) in imgs.enumerated() {
+            let oneBased = idx + 1
+            let name: String = {
+                if idx < ref2vaImageNames.count && !ref2vaImageNames[idx].isEmpty {
+                    return ref2vaImageNames[idx]
+                }
+                return L("参考图片 \(oneBased)", "Reference Image \(oneBased)")
+            }()
+            items.append(
+                Ref2VAMentionCandidate(
+                    id: "image_\(oneBased)",
+                    tag: "<Picture \(oneBased)>",
+                    modality: "image",
+                    index: oneBased,
+                    filename: name,
+                    thumbnail: img,
+                    isUploaded: true
+                )
+            )
+        }
+        for (idx, vURL) in ref2vaVideoURLs.prefix(Self.maxRef2VAVideos).enumerated() {
+            let oneBased = idx + 1
+            items.append(
+                Ref2VAMentionCandidate(
+                    id: "video_\(oneBased)",
+                    tag: "<Video \(oneBased)>",
+                    modality: "video",
+                    index: oneBased,
+                    filename: vURL.lastPathComponent,
+                    thumbnail: nil,
+                    isUploaded: true
+                )
+            )
+        }
+        for (idx, aURL) in ref2vaAudioURLs.prefix(Self.maxRef2VAAudios).enumerated() {
+            let oneBased = idx + 1
+            items.append(
+                Ref2VAMentionCandidate(
+                    id: "audio_\(oneBased)",
+                    tag: "<Audio \(oneBased)>",
+                    modality: "audio",
+                    index: oneBased,
+                    filename: aURL.lastPathComponent,
+                    thumbnail: nil,
+                    isUploaded: true
+                )
+            )
+        }
+
+        // 若用户先输入 @ 但尚未上传某个模态的资产，也提供顺序号预设入口，方便先写提示词再传资产
+        if items.isEmpty {
+            items.append(
+                Ref2VAMentionCandidate(
+                    id: "placeholder_pic1",
+                    tag: "<Picture 1>",
+                    modality: "image",
+                    index: 1,
+                    filename: L("待上传第 1 张参考图", "Slot 1 Image"),
+                    thumbnail: nil,
+                    isUploaded: false
+                )
+            )
+            items.append(
+                Ref2VAMentionCandidate(
+                    id: "placeholder_vid1",
+                    tag: "<Video 1>",
+                    modality: "video",
+                    index: 1,
+                    filename: L("待上传第 1 段参考视频", "Slot 1 Video"),
+                    thumbnail: nil,
+                    isUploaded: false
+                )
+            )
+            items.append(
+                Ref2VAMentionCandidate(
+                    id: "placeholder_aud1",
+                    tag: "<Audio 1>",
+                    modality: "audio",
+                    index: 1,
+                    filename: L("待上传第 1 段参考音频", "Slot 1 Audio"),
+                    thumbnail: nil,
+                    isUploaded: false
+                )
+            )
+        }
+
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return items }
+        let filtered = items.filter { item in
+            item.tag.lowercased().contains(q)
+                || item.filename.lowercased().contains(q)
+                || item.aliasLabel.lowercased().contains(q)
+                || "\(item.index)" == q
+                || (item.modality == "image" && (q.contains("图") || q.contains("pic") || q.contains("img")))
+                || (item.modality == "video" && (q.contains("视") || q.contains("vid") || q.contains("mov")))
+                || (item.modality == "audio" && (q.contains("音") || q.contains("aud") || q.contains("声") || q.contains("歌")))
+        }
+        return filtered.isEmpty ? items : filtered
     }
     @Published var selectedVideoResolution: ResolutionOption = VIDEO_RESOLUTIONS[0]
     @Published var selectedImageResolution: ResolutionOption = IMAGE_RESOLUTIONS[0]
@@ -1309,10 +1542,10 @@ class StudioViewModel: ObservableObject {
             )
             return
         }
-        if taskModeId == "ref2va" && effectiveRef2VAImages.isEmpty && ref2vaVideoURLs.isEmpty {
+        if taskModeId == "ref2va" && effectiveRef2VAImages.isEmpty && ref2vaVideoURLs.isEmpty && ref2vaAudioURLs.isEmpty {
             statusMessage = L(
-                "在「多模态参考生视频 (Ref2VA)」模式下，请至少添加 1 张参考图（最多 9 张 <Picture 1>~<Picture 9>）或 1 段参考视频（最多 3 段 <Video 1>~<Video 3>）。",
-                "In Reference-to-Video (Ref2VA) mode, please add at least 1 reference image (up to 9: <Picture 1>–<Picture 9>) or 1 reference video (up to 3: <Video 1>–<Video 3>)."
+                "在「多模态参考生视频 (Ref2VA)」模式下，请至少添加 1 张参考图 (<Picture 1>~<Picture 9>)、1 段参考视频 (<Video 1>~<Video 3>) 或 1 段参考音频 (<Audio 1>~<Audio 3>)。",
+                "In Reference-to-Video (Ref2VA) mode, please add at least 1 reference image (<Picture 1>–<Picture 9>), 1 reference video (<Video 1>–<Video 3>), or 1 reference audio (<Audio 1>–<Audio 3>)."
             )
             return
         }
@@ -1436,6 +1669,10 @@ class StudioViewModel: ObservableObject {
                 let refVidsB64 = ref2vaVideoURLs.prefix(Self.maxRef2VAVideos).compactMap { encodeVideoFileToBase64($0) }
                 if !refVidsB64.isEmpty {
                     payload["ref_videos_base64"] = refVidsB64
+                }
+                let refAudsB64 = ref2vaAudioURLs.prefix(Self.maxRef2VAAudios).compactMap { encodeVideoFileToBase64($0) }
+                if !refAudsB64.isEmpty {
+                    payload["ref_audios_base64"] = refAudsB64
                 }
             } else if needsImage {
                 if let firstImg = firstFrameImage, let b64 = encodeImageToBase64(firstImg) {

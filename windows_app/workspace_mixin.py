@@ -239,16 +239,20 @@ class WorkspaceMixin:
         self.video_frames_card.body.addLayout(wells_row)
         lay.addWidget(self.video_frames_card)
 
-        # Ref2VA Multi-Reference Card (Up to 9 Images + Up to 3 Videos)
+        # Ref2VA Multi-Reference Card (Up to 9 Images + Up to 3 Videos + Up to 3 Audios)
         self.ref2va_assets_card = WorkspaceCard(
-            tr("多模态参考资产工作台 (Ref2VA · 最多 9 张参考图 + 3 段参考视频)", "Multimodal Reference Assets (Ref2VA · Up to 9 Images + 3 Videos)"),
             tr(
-                "按 MiniMax-H3 Ref2VA 官方模型上限设计：最多选择 9 张参考图（<Picture 1>~<Picture 9>）与 3 段参考视频（<Video 1>~<Video 3>），总资产上限 12 个",
-                "Official MiniMax-H3 Ref2VA capacity: up to 9 reference images (<Picture 1>–<Picture 9>) + 3 reference videos (<Video 1>–<Video 3>), max 12 assets total",
+                "多模态参考资产工作台 (Ref2VA · 最多 9 张参考图 + 3 段参考视频 + 3 段参考音频)",
+                "Multimodal Reference Assets (Ref2VA · Up to 9 Images + 3 Videos + 3 Audios)",
+            ),
+            tr(
+                "按 MiniMax-H3 Ref2VA 官方模型上限设计：最多选择 9 张参考图 (<Picture 1>~<Picture 9>)、3 段参考视频 (<Video 1>~<Video 3>) 与 3 段参考音频 (<Audio 1>~<Audio 3>)，在提示词中输入 @ 可触发选择插入",
+                "Official MiniMax-H3 Ref2VA capacity: up to 9 images (<Picture 1>–<Picture 9>), 3 videos (<Video 1>–<Video 3>), and 3 audios (<Audio 1>–<Audio 3>). Type @ in prompt to insert tags",
             ),
         )
         self.ref2va_image_paths: List[str] = []
         self.ref2va_video_paths: List[str] = []
+        self.ref2va_audio_paths: List[str] = []
 
         ref_img_row = QHBoxLayout()
         ref_img_row.setSpacing(8)
@@ -276,19 +280,38 @@ class WorkspaceMixin:
         ref_vid_row.addWidget(self.ref2va_clear_vids_btn)
         self.ref2va_assets_card.body.addLayout(ref_vid_row)
 
+        ref_aud_row = QHBoxLayout()
+        ref_aud_row.setSpacing(8)
+        self.ref2va_aud_status_lbl = QLabel(tr("参考音频 (0/3)：尚未添加 (<Audio 1> ~ <Audio 3>)", "Ref Audios (0/3): None added (<Audio 1>–<Audio 3>)"))
+        self.ref2va_aud_status_lbl.setWordWrap(True)
+        ref_aud_row.addWidget(self.ref2va_aud_status_lbl, 1)
+        self.ref2va_add_auds_btn = QPushButton(tr("🎵 选择参考音频 (最多3段)", "🎵 Add Audios (Max 3)"))
+        self.ref2va_add_auds_btn.clicked.connect(self._on_pick_ref2va_audios)
+        ref_aud_row.addWidget(self.ref2va_add_auds_btn)
+        self.ref2va_clear_auds_btn = QPushButton(tr("清空音频", "Clear"))
+        self.ref2va_clear_auds_btn.clicked.connect(self._on_clear_ref2va_audios)
+        ref_aud_row.addWidget(self.ref2va_clear_auds_btn)
+        self.ref2va_assets_card.body.addLayout(ref_aud_row)
+
         lay.addWidget(self.ref2va_assets_card)
 
         # Multimodal Prompt Composer
         p_card = WorkspaceCard(
             tr("镜头与多模态提示词", "Camera & Multimodal Audio-Video Prompt"),
             tr(
-                "描述画面主体、镜头运动、光影风格，并可同步指定环境音效/台词对白与背景配乐",
-                "Describe visual subjects, camera motion, and lighting, plus synced soundscape/dialogue & background score",
+                "描述画面主体、镜头运动、光影风格，并可同步指定环境音效/台词对白与背景配乐（支持输入 @ 选择参考资产）",
+                "Describe visual subjects, camera motion, and lighting, plus synced soundscape/dialogue & background score (type @ to mention assets)",
             ),
         )
-        p_card.body.addWidget(
-            QLabel(tr("视觉画面与运镜描述 (Visual & Camera Prompt)", "Visual & Camera Motion Prompt"))
+        p_hdr_row = QHBoxLayout()
+        p_hdr_row.addWidget(
+            QLabel(tr("视觉画面与运镜描述 (输入 @ 触发插入 <Picture N> / <Video N> / <Audio N>)", "Visual & Camera Prompt (Type @ to insert <Picture N> / <Video N> / <Audio N>)"))
         )
+        p_hdr_row.addStretch(1)
+        self.vid_at_mention_btn = QPushButton(tr("@ 引用参考资产", "@ Mention Asset"))
+        self.vid_at_mention_btn.clicked.connect(self._show_ref2va_at_mention_menu)
+        p_hdr_row.addWidget(self.vid_at_mention_btn)
+        p_card.body.addLayout(p_hdr_row)
         self.vid_visual_edit = QPlainTextEdit(self.vm.visual_prompt)
         self.vid_visual_edit.setPlaceholderText(
             tr("输入主体、构图、运镜与光影风格描述...", "Describe subject, framing, camera movement, and lighting...")

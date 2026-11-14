@@ -1134,10 +1134,13 @@ extension MainStudioView {
             }
         case "ref2va":
             WorkspaceCard(
-                title: L("多模态参考资产工作台 (Ref2VA · 最多 9 张参考图 + 3 段参考视频)", "Multimodal Reference Assets (Ref2VA · Up to 9 Images + 3 Videos)"),
+                title: L(
+                    "多模态参考资产工作台 (Ref2VA · 最多 9 张参考图 + 3 段参考视频 + 3 段参考音频)",
+                    "Multimodal Reference Assets (Ref2VA · Up to 9 Images + 3 Videos + 3 Audios)"
+                ),
                 subtitle: L(
-                    "按 MiniMax-H3 Ref2VA 官方模型上限设计：支持上传最多 9 张角色/主体/场景参考图（用 <Picture 1>~<Picture 9> 引用）与最多 3 段动作/运镜参考视频（用 <Video 1>~<Video 3> 引用），总资产上限 12 个",
-                    "Official MiniMax-H3 Ref2VA capacity: up to 9 character/subject/scene images (<Picture 1>–<Picture 9>) and up to 3 motion/camera videos (<Video 1>–<Video 3>), up to 12 assets total"
+                    "按 MiniMax-H3 Ref2VA 官方模型上限设计：最多上传 9 张参考图 (<Picture 1>~<Picture 9>)、3 段参考视频 (<Video 1>~<Video 3>) 与 3 段参考音频 (<Audio 1>~<Audio 3>)，总资产上限 12 个；在下方提示词中输入 @ 可触发选择并自动保持编号对应",
+                    "Official MiniMax-H3 Ref2VA capacity: up to 9 images (<Picture 1>–<Picture 9>), 3 videos (<Video 1>–<Video 3>), and 3 audios (<Audio 1>–<Audio 3>), max 12 assets total. Type @ in the prompt below to pick and insert matching tags"
                 ),
                 icon: "person.2.crop.square.stack"
             ) {
@@ -1302,10 +1305,133 @@ extension MainStudioView {
         height: CGFloat,
         palette: StudioPalette
     ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
+        let supportsAtMention = vm.taskModeId == "ref2va"
+            || (vm.taskModeId == "i2i_edit" && vm.isMiniMaxH3ImageModel)
+            || !vm.ref2vaImages.isEmpty
+            || !vm.ref2vaVideoURLs.isEmpty
+            || !vm.ref2vaAudioURLs.isEmpty
+        let activeAtQuery = supportsAtMention ? vm.activeAtMentionQuery(in: text.wrappedValue) : nil
+        let atCandidates = activeAtQuery != nil
+            ? vm.ref2vaMentionCandidates(matching: activeAtQuery ?? "")
+            : (supportsAtMention ? vm.ref2vaMentionCandidates() : [])
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if supportsAtMention {
+                    Menu {
+                        ForEach(vm.ref2vaMentionCandidates()) { item in
+                            Button {
+                                text.wrappedValue = vm.replaceActiveAtMention(in: text.wrappedValue, with: item.tag)
+                            } label: {
+                                Label(
+                                    "\(item.aliasLabel) → \(item.tag) (\(item.filename))",
+                                    systemImage: item.iconName
+                                )
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "at")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(L("引用参考资产 (输入 @ 触发)", "Mention Asset (Type @)"))
+                                .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            }
+
+            if let query = activeAtQuery, !atCandidates.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "at.circle.fill")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                        Text(
+                            query.isEmpty
+                                ? L("已触发 @ 参考资产选择（点击下方图片 / 视频 / 音频即可插入对应顺序标签）：",
+                                    "@ Reference selector triggered (Click an image / video / audio below to insert its sequential tag):")
+                                : L("正在匹配 \"@\(query)\"（点击直接替换为对应标签）：",
+                                    "Matching \"@\(query)\" (Click to replace with tag):")
+                        )
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        Spacer()
+                    }
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(atCandidates) { item in
+                                Button {
+                                    text.wrappedValue = vm.replaceActiveAtMention(in: text.wrappedValue, with: item.tag)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if let thumb = item.thumbnail {
+                                            Image(nsImage: thumb)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 24, height: 24)
+                                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        } else {
+                                            Image(systemName: item.iconName)
+                                                .font(.system(size: 13, weight: .semibold))
+                                                .foregroundStyle(Color.accentColor)
+                                                .frame(width: 22, height: 22)
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            HStack(spacing: 4) {
+                                                Text(item.aliasLabel)
+                                                    .font(.system(size: 10.5, weight: .bold))
+                                                    .foregroundStyle(Color.accentColor)
+                                                Text(item.tag)
+                                                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                                    .foregroundStyle(.primary)
+                                            }
+                                            Text(item.filename)
+                                                .font(.system(size: 9.5))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 7)
+                                            .fill(palette.workspaceCardFill)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 7)
+                                                    .strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1.0)
+                                            )
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.accentColor.opacity(0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 0.9)
+                        )
+                )
+            }
+
             ZStack(alignment: .topLeading) {
                 if text.wrappedValue.isEmpty && !placeholder.isEmpty {
                     Text(placeholder)

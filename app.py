@@ -5797,18 +5797,140 @@ def decode_base64_video_frames(
     )
 
 
+def load_reference_audio_item(
+    audio_source: Any,
+    target_sr: int = 32000,
+) -> Optional[Dict[str, Any]]:
+    """
+    将参考音频（文件路径、base64 字符串、字节流、Tensor 或 (waveform, sr) 元组）解码为
+    MiniMaxH3Pipeline references 所需的 {"type": "audio", "audio": waveform_tensor, "sample_rate": sr} 字典。
+    对应提示词中的 <Audio 1> ~ <Audio 3> 标签（按 1 起始顺序号严格对应）。
+    """
+    if audio_source is None:
+        return None
+
+    # 1. 若已是预处理好的字典 / 元组 / Tensor
+    if isinstance(audio_source, dict) and audio_source.get("audio") is not None:
+        return {
+            "type": "audio",
+            "audio": audio_source["audio"],
+            "sample_rate": int(audio_source.get("sample_rate") or target_sr),
+        }
+    if isinstance(audio_source, tuple) and len(audio_source) == 2:
+        wf, sr = audio_source
+        if not isinstance(wf, torch.Tensor):
+            wf = torch.as_tensor(wf, dtype=torch.float32)
+        return {"type": "audio", "audio": wf, "sample_rate": int(sr or target_sr)}
+    if isinstance(audio_source, torch.Tensor):
+        return {"type": "audio", "audio": audio_source, "sample_rate": int(target_sr)}
+
+    temp_audio_path: Optional[str] = None
+    audio_path: Optional[str] = None
+    try:
+        if isinstance(audio_source, str):
+            s_val = audio_source.strip()
+            if not s_val:
+                return None
+            if os.path.isfile(s_val):
+                audio_path = s_val
+            else:
+                if "," in s_val and s_val.split(",", 1)[0].lower().startswith("data:"):
+                    s_val = s_val.split(",", 1)[1]
+                raw_bytes = base64.b64decode(s_val)
+                fd, temp_audio_path = tempfile.mkstemp(suffix=".wav", prefix="easycolab_refaud_")
+                with os.fdopen(fd, "wb") as tf:
+                    tf.write(raw_bytes)
+                audio_path = temp_audio_path
+        elif isinstance(audio_source, (bytes, bytearray)):
+            fd, temp_audio_path = tempfile.mkstemp(suffix=".wav", prefix="easycolab_refaud_")
+            with os.fdopen(fd, "wb") as tf:
+                tf.write(bytes(audio_source))
+            audio_path = temp_audio_path
+        elif hasattr(audio_source, "name") and isinstance(getattr(audio_source, "name"), str) and os.path.isfile(audio_source.name):
+            audio_path = audio_source.name
+
+        if not audio_path or not os.path.isfile(audio_path):
+            return None
+
+        # 优先使用 DiffSynth 官方 read_audio
+        try:
+            from diffsynth.utils.data.audio import read_audio
+            res = read_audio(audio_path)
+            if isinstance(res, tuple) and len(res) >= 2:
+                wf, sr = res[0], int(res[1])
+                if not isinstance(wf, torch.Tensor):
+                    wf = torch.as_tensor(wf, dtype=torch.float32)
+                return {"type": "audio", "audio": wf, "sample_rate": sr}
+        except Exception:
+            pass
+
+        # 回退方案 1: torchaudio
+        try:
+            import torchaudio
+            wf, sr = torchaudio.load(audio_path)
+            return {"type": "audio", "audio": wf.to(torch.float32), "sample_rate": int(sr)}
+        except Exception:
+            pass
+
+        # 回退方案 2: soundfile
+        try:
+            import soundfile as sf
+            data, sr = sf.read(audio_path, dtype="float32", always_2d=True)
+            wf = torch.from_numpy(data.T).to(torch.float32)
+            return {"type": "audio", "audio": wf, "sample_rate": int(sr)}
+        except Exception:
+            pass
+
+        # 回退方案 3: Python 标准库 wave (支持 PCM WAV)
+        try:
+            import wave
+            import array
+            with wave.open(audio_path, "rb") as wf_reader:
+                sr = wf_reader.getframerate() or target_sr
+                n_channels = max(1, wf_reader.getnchannels())
+                sampwidth = wf_reader.getsampwidth()
+                n_frames = wf_reader.getnframes()
+                raw_pcm = wf_reader.readframes(n_frames)
+                if sampwidth == 2:
+                    samples = array.array("h", raw_pcm)
+                    t_pcm = torch.tensor(samples, dtype=torch.float32) / 32768.0
+                elif sampwidth == 1:
+                    samples = array.array("B", raw_pcm)
+                    t_pcm = (torch.tensor(samples, dtype=torch.float32) - 128.0) / 128.0
+                else:
+                    t_pcm = torch.zeros((n_channels, max(1, n_frames)), dtype=torch.float32)
+                if t_pcm.ndim == 1:
+                    t_pcm = t_pcm.view(-1, n_channels).transpose(0, 1).contiguous()
+                return {"type": "audio", "audio": t_pcm, "sample_rate": int(sr)}
+        except Exception:
+            pass
+
+        return None
+    except Exception as e:
+        print(f"[Ref2VA 音频参考解码提示] 解析参考音频跳过: {e}")
+        return None
+    finally:
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+            except Exception:
+                pass
+
+
 def build_minimax_h3_references(
     ref_images: Optional[Sequence[Any]] = None,
     ref_videos: Optional[Sequence[Any]] = None,
+    ref_audios: Optional[Sequence[Any]] = None,
     width: int = 832,
     height: int = 480,
     fps: int = 24,
     max_video_frames: int = 124,
 ) -> List[Dict[str, Any]]:
     """
-    按 MiniMax-H3 Ref2VA 官方模型上限构建 references 多模态列表：
+    按 MiniMax-H3 Ref2VA 官方模型上限构建 references 多模态列表（各模态内部严格按 1 起始顺序号对应提示词标签）：
     - 参考图片 (type="image"): 最多 9 张 (<Picture 1> ~ <Picture 9> / <Subject 1> ~ <Subject 9>)
     - 参考视频 (type="video"): 最多 3 段 (<Video 1> ~ <Video 3>)
+    - 参考音频 (type="audio"): 最多 3 段 (<Audio 1> ~ <Audio 3>)
     - 总参考资产上限: 12 个
     """
     refs: List[Dict[str, Any]] = []
@@ -5864,6 +5986,18 @@ def build_minimax_h3_references(
                 refs.append({"type": "video", "video": v_frames})
                 vid_count += 1
 
+    if ref_audios:
+        aud_count = 0
+        for a_item in ref_audios:
+            if aud_count >= MAX_REF2VA_AUDIOS or len(refs) >= MAX_REF2VA_TOTAL_ASSETS:
+                break
+            if a_item is None:
+                continue
+            aud_entry = load_reference_audio_item(a_item)
+            if aud_entry is not None:
+                refs.append(aud_entry)
+                aud_count += 1
+
     return refs
 
 
@@ -5892,6 +6026,7 @@ def generate_video(
     save_dir: str,
     ref_images_files: Optional[List[Any]] = None,
     ref_videos_files: Optional[List[Any]] = None,
+    ref_audios_files: Optional[List[Any]] = None,
     progress=gr.Progress(track_tqdm=True),
 ) -> Tuple[Optional[str], str, int, List[str]]:
     global PIPELINE
@@ -5938,9 +6073,13 @@ def generate_video(
         candidate_vids: List[Any] = []
         if ref_videos_files:
             candidate_vids.extend(ref_videos_files if isinstance(ref_videos_files, list) else [ref_videos_files])
+        candidate_auds: List[Any] = []
+        if ref_audios_files:
+            candidate_auds.extend(ref_audios_files if isinstance(ref_audios_files, list) else [ref_audios_files])
         references = build_minimax_h3_references(
             ref_images=candidate_imgs[:MAX_REF2VA_IMAGES],
             ref_videos=candidate_vids[:MAX_REF2VA_VIDEOS],
+            ref_audios=candidate_auds[:MAX_REF2VA_AUDIOS],
             width=width,
             height=height,
             fps=int(fps),
@@ -5949,7 +6088,7 @@ def generate_video(
         if not references:
             return (
                 None,
-                "⚠️ 在「主体参考生音视频 (Ref2VA)」模式下，请至少上传 1 张参考图片（最多 9 张 `<Picture 1>`~`<Picture 9>`）或 1 段参考视频（最多 3 段 `<Video 1>`~`<Video 3>`）！",
+                "⚠️ 在「主体参考生音视频 (Ref2VA)」模式下，请至少上传 1 张参考图片（`<Picture 1>`~`<Picture 9>`）、1 段参考视频（`<Video 1>`~`<Video 3>`）或 1 段参考音频（`<Audio 1>`~`<Audio 3>`）！",
                 seed,
                 get_history_videos(save_dir),
             )
@@ -8430,6 +8569,9 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
         raw_ref_vid_b64s: List[str] = [
             v.strip() for v in (req.ref_videos_base64 or []) if v and str(v).strip()
         ][:MAX_REF2VA_VIDEOS]
+        raw_ref_aud_b64s: List[str] = [
+            a.strip() for a in (req.ref_audios_base64 or []) if a and str(a).strip()
+        ][:MAX_REF2VA_AUDIOS]
 
         keyframes = []
         keyframe_indices = []
@@ -8447,11 +8589,12 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
                     JOBS[job_id]["message"] = "首尾帧模式下请至少提供首帧或尾帧图片"
                     return
             elif req.task_mode == "ref2va" or (
-                pipeline_arch == "minimax_h3_ref2va" and (raw_ref_img_b64s or raw_ref_vid_b64s)
+                pipeline_arch == "minimax_h3_ref2va" and (raw_ref_img_b64s or raw_ref_vid_b64s or raw_ref_aud_b64s)
             ):
                 references = build_minimax_h3_references(
                     ref_images=raw_ref_img_b64s,
                     ref_videos=raw_ref_vid_b64s,
+                    ref_audios=raw_ref_aud_b64s,
                     width=int(req.width),
                     height=int(req.height),
                     fps=int(req.fps),
@@ -8460,7 +8603,7 @@ def _run_async_generation_job(job_id: str, req: GenerateVideoRequest):
                 if req.task_mode == "ref2va" and not references:
                     JOBS[job_id]["status"] = "failed"
                     JOBS[job_id]["message"] = (
-                        "主体参考生视频 (Ref2VA) 模式下请至少提供 1 张参考图（最多 9 张 <Picture 1>~<Picture 9>）或 1 段参考视频（最多 3 段 <Video 1>~<Video 3>）"
+                        "主体参考生视频 (Ref2VA) 模式下请至少提供 1 张参考图 (<Picture 1>~<Picture 9>)、1 段参考视频 (<Video 1>~<Video 3>) 或 1 段参考音频 (<Audio 1>~<Audio 3>)"
                     )
                     return
         elif modality == "image" and req.task_mode == "i2i_edit" and first_img is None and last_img is None:
@@ -10815,9 +10958,10 @@ def create_ui() -> gr.Blocks:
                     with gr.TabItem("🖼️ 首尾帧生音视频 / FL2VA", id="fl2va") as tab_fl2va:
                         fl2va_desc_md = gr.Markdown("在下方图像区上传 **首帧** 和/或 **尾帧** 图片，按关键帧锚点生成过渡视频与立体声。")
 
-                    with gr.TabItem("🎭 主体参考音视频 / Ref2VA (最多9图+3视频)", id="ref2va") as tab_ref2va:
+                    with gr.TabItem("🎭 主体参考音视频 / Ref2VA (最多9图+3视频+3音频)", id="ref2va") as tab_ref2va:
                         ref2va_desc_md = gr.Markdown(
-                            "支持官方满血多模态参考上限：最多上传 **9 张参考图**（提示词用 `<Picture 1>`~`<Picture 9>` 或 `<Subject 1>`~`<Subject 9>` 引用角色/场景）+ **3 段参考视频**（用 `<Video 1>`~`<Video 3>` 引用动作/运镜），总参考资产上限 **12 个**（推荐搭配 `MiniMax-H3-Ref2VA` 权重）。"
+                            "支持官方满血多模态参考上限：最多上传 **9 张参考图**（提示词用 `<Picture 1>`~`<Picture 9>` 引用角色/场景）+ **3 段参考视频**（用 `<Video 1>`~`<Video 3>` 引用动作/运镜）+ **3 段参考音频**（用 `<Audio 1>`~`<Audio 3>` 引用人声/配乐），总参考资产上限 **12 个**。\n"
+                            "💡 **提示词联动**：在下方提示词输入框中输入 **`@`** 符号（如 `@`、`@图`、`@视频`、`@音频`、`@1`），即可触发下拉选择并自动将 `@...` 替换为对应的 `<Picture N>` / `<Video N>` / `<Audio N>` 顺序标签！"
                         )
                         with gr.Row():
                             ref_images_files_input = gr.File(
@@ -10830,6 +10974,14 @@ def create_ui() -> gr.Blocks:
                                 file_types=["video"],
                                 label="🎬 动作/运镜参考视频 (最多 3 段 · 对应 <Video 1> ~ <Video 3>)",
                             )
+                            ref_audios_files_input = gr.File(
+                                file_count="multiple",
+                                file_types=["audio"],
+                                label="🎵 音色/节拍参考音频 (最多 3 段 · 对应 <Audio 1> ~ <Audio 3>)",
+                            )
+                        ref2va_mapping_md = gr.Markdown(
+                            "🔗 **当前已上传参考资产与标签对应关系**：尚未上传多模态参考资产（支持在提示词中输入 `@` 触发选择）"
+                        )
 
                 with gr.Row():
                     first_frame_input = gr.Image(
@@ -10844,9 +10996,21 @@ def create_ui() -> gr.Blocks:
                     )
 
                 with gr.Group():
+                    with gr.Row():
+                        ref2va_at_selector = gr.Dropdown(
+                            choices=[
+                                ("🖼️ @图片1 → <Picture 1>", "<Picture 1>"),
+                                ("🖼️ @图片2 → <Picture 2>", "<Picture 2>"),
+                                ("🎬 @视频1 → <Video 1>", "<Video 1>"),
+                                ("🎵 @音频1 → <Audio 1>", "<Audio 1>"),
+                            ],
+                            value=None,
+                            label="⚡ @ 触发参考资产选择器（在下方提示词中输入 @ 自动过滤，或点击直接插入对应标签）",
+                            scale=4,
+                        )
                     visual_prompt_input = gr.Textbox(
-                        label="🎥 画面主体与镜头描述 (Visual & Camera Prompt)",
-                        placeholder="描述画面主体、动作、运镜方式、光影风格...",
+                        label="🎥 画面主体与镜头描述 (输入 @ 触发插入 <Picture N> / <Video N> / <Audio N>)",
+                        placeholder="描述画面主体、动作、运镜方式、光影风格...（输入 @ 可快速选择已上传的图片、视频或音频标签）",
                         lines=4,
                     )
                     with gr.Row():
@@ -11078,6 +11242,95 @@ def create_ui() -> gr.Blocks:
             outputs=run_status_box,
         ).then(fn=get_gpu_and_model_summary_text, inputs=None, outputs=gpu_status_text)
 
+        def _build_ref2va_at_candidates(first_im, last_im, img_files, vid_files, aud_files, prompt_txt: str = ""):
+            choices: List[Tuple[str, str]] = []
+            md_parts: List[str] = []
+
+            img_names: List[str] = []
+            if first_im is not None:
+                img_names.append("首帧图片")
+            if last_im is not None:
+                img_names.append("尾帧图片")
+            for f in (img_files or []):
+                fname = os.path.basename(getattr(f, "name", str(f)))
+                img_names.append(fname)
+            img_names = img_names[:MAX_REF2VA_IMAGES]
+
+            vid_names: List[str] = [
+                os.path.basename(getattr(f, "name", str(f))) for f in (vid_files or [])
+            ][:MAX_REF2VA_VIDEOS]
+            aud_names: List[str] = [
+                os.path.basename(getattr(f, "name", str(f))) for f in (aud_files or [])
+            ][:MAX_REF2VA_AUDIOS]
+
+            for i, name in enumerate(img_names, start=1):
+                tag = f"<Picture {i}>"
+                choices.append((f"🖼️ @图片{i} → {tag} ({name})", tag))
+                md_parts.append(f"`{tag}` ↔ 🖼️ {name}")
+            for i, name in enumerate(vid_names, start=1):
+                tag = f"<Video {i}>"
+                choices.append((f"🎬 @视频{i} → {tag} ({name})", tag))
+                md_parts.append(f"`{tag}` ↔ 🎬 {name}")
+            for i, name in enumerate(aud_names, start=1):
+                tag = f"<Audio {i}>"
+                choices.append((f"🎵 @音频{i} → {tag} ({name})", tag))
+                md_parts.append(f"`{tag}` ↔ 🎵 {name}")
+
+            if not choices:
+                choices = [
+                    ("🖼️ @图片1 → <Picture 1> (待上传参考图 1)", "<Picture 1>"),
+                    ("🖼️ @图片2 → <Picture 2> (待上传参考图 2)", "<Picture 2>"),
+                    ("🎬 @视频1 → <Video 1> (待上传参考视频 1)", "<Video 1>"),
+                    ("🎵 @音频1 → <Audio 1> (待上传参考音频 1)", "<Audio 1>"),
+                ]
+                md_str = "🔗 **当前已上传参考资产与标签对应关系**：尚未上传多模态参考资产（支持在提示词中输入 `@` 触发选择）"
+            else:
+                md_str = "🔗 **当前已上传参考资产与标签对应关系（严格按 1 起始顺序号对应）**：" + " ｜ ".join(md_parts)
+
+            # 若提示词末尾或内部包含 @ 过滤词（如 @图 / @vid / @aud / @1），优先过滤匹配项
+            m = re.search(r"@([^\s<>@]*)$", (prompt_txt or ""))
+            if m:
+                kw = m.group(1).strip().lower()
+                if kw:
+                    filtered = [
+                        (lbl, val) for lbl, val in choices
+                        if kw in lbl.lower() or kw in val.lower()
+                    ]
+                    if filtered:
+                        choices = filtered
+            return gr.update(choices=choices, value=None), md_str
+
+        def _on_select_at_reference_tag(selected_tag: Optional[str], current_prompt: str):
+            if not selected_tag:
+                return gr.update(), gr.update(value=None)
+            txt = current_prompt or ""
+            # 若用户在提示词中输入了 @ 或 @关键词，直接将该 @片段替换为选中的 <Picture N> / <Video N> / <Audio N>
+            if re.search(r"@[^\s<>@]*$", txt):
+                new_txt = re.sub(r"@[^\s<>@]*$", f"{selected_tag} ", txt)
+            elif "@" in txt:
+                idx = txt.rfind("@")
+                end_idx = idx + 1
+                while end_idx < len(txt) and not txt[end_idx].isspace() and txt[end_idx] not in "<>@":
+                    end_idx += 1
+                new_txt = txt[:idx] + selected_tag + " " + txt[end_idx:].lstrip()
+            else:
+                sep = "" if (not txt or txt.endswith(" ")) else " "
+                new_txt = f"{txt}{sep}{selected_tag} "
+            return new_txt, gr.update(value=None)
+
+        for _ref_comp in (first_frame_input, last_frame_input, ref_images_files_input, ref_videos_files_input, ref_audios_files_input):
+            _ref_comp.change(
+                fn=_build_ref2va_at_candidates,
+                inputs=[first_frame_input, last_frame_input, ref_images_files_input, ref_videos_files_input, ref_audios_files_input, visual_prompt_input],
+                outputs=[ref2va_at_selector, ref2va_mapping_md],
+            )
+
+        ref2va_at_selector.change(
+            fn=_on_select_at_reference_tag,
+            inputs=[ref2va_at_selector, visual_prompt_input],
+            outputs=[visual_prompt_input, ref2va_at_selector],
+        )
+
         generate_btn.click(
             fn=generate_video,
             inputs=[
@@ -11096,6 +11349,7 @@ def create_ui() -> gr.Blocks:
                 save_dir_input,
                 ref_images_files_input,
                 ref_videos_files_input,
+                ref_audios_files_input,
             ],
             outputs=[output_video, run_status_box, seed_input, history_gallery],
         ).then(fn=get_gpu_and_model_summary_text, inputs=None, outputs=gpu_status_text)

@@ -372,6 +372,7 @@ def _load_minimax_h3_image_helpers(tmp_root: str):
         "_align_minimax_h3_frame_count",
         "load_reference_video_frames",
         "decode_base64_video_frames",
+        "load_reference_audio_item",
         "build_minimax_h3_references",
         "decode_base64_image",
     }
@@ -675,6 +676,23 @@ class MiniMaxH3ImageEngineTest(unittest.TestCase):
             # 8 frames aligned to 17k+5 -> 22 frames, each resized to (832, 480)
             self.assertEqual(len(vid_refs[0]["video"]), 22)
             self.assertEqual(vid_refs[0]["video"][0].size, (832, 480))
+
+            # Verify 2 images + 2 videos + 4 audios -> 2 images + 2 videos + 3 audios (capped at MAX_REF2VA_AUDIOS=3)
+            auds = [{"audio": f"WAVE_{a}", "sample_rate": 32000} for a in range(4)]
+            refs_with_aud = ns["build_minimax_h3_references"](
+                ref_images=imgs[:2],
+                ref_videos=vids[:2],
+                ref_audios=auds,
+                width=832,
+                height=480,
+                fps=24,
+                max_video_frames=124,
+            )
+            self.assertEqual(len([r for r in refs_with_aud if r["type"] == "image"]), 2)
+            self.assertEqual(len([r for r in refs_with_aud if r["type"] == "video"]), 2)
+            aud_refs = [r for r in refs_with_aud if r["type"] == "audio"]
+            self.assertEqual(len(aud_refs), 3)
+            self.assertEqual(aud_refs[0]["sample_rate"], 32000)
 
 
 if __name__ == "__main__":

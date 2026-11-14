@@ -529,6 +529,7 @@ struct Ref2VAMultiReferencePanel: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isImageDropTargeted: Bool = false
     @State private var isVideoDropTargeted: Bool = false
+    @State private var isAudioDropTargeted: Bool = false
 
     private let imageColumns = [
         GridItem(.adaptive(minimum: 128, maximum: 185), spacing: 10)
@@ -544,8 +545,8 @@ struct Ref2VAMultiReferencePanel: View {
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
                     Text(L(
-                        "角色 / 主体 / 场景参考图（最多 \(StudioViewModel.maxRef2VAImages) 张 · 点击标签可插入 <Picture 1> ~ <Picture 9>）",
-                        "Character / Subject / Scene Images (Up to \(StudioViewModel.maxRef2VAImages) · Click tag to insert <Picture 1>–<Picture 9>)"
+                        "角色 / 主体 / 场景参考图（最多 \(StudioViewModel.maxRef2VAImages) 张 · 提示词输入 @ 或点击标签插入 <Picture 1> ~ <Picture 9>）",
+                        "Character / Subject / Scene Images (Up to \(StudioViewModel.maxRef2VAImages) · Type @ or click tag to insert <Picture 1>–<Picture 9>)"
                     ))
                     .font(.system(size: 12.5, weight: .semibold))
 
@@ -582,6 +583,9 @@ struct Ref2VAMultiReferencePanel: View {
                 LazyVGrid(columns: imageColumns, spacing: 10) {
                     ForEach(Array(vm.ref2vaImages.enumerated()), id: \.offset) { idx, img in
                         let tag = "<Picture \(idx + 1)>"
+                        let imgName = (idx < vm.ref2vaImageNames.count && !vm.ref2vaImageNames[idx].isEmpty)
+                            ? vm.ref2vaImageNames[idx]
+                            : L("参考图 \(idx + 1)", "Image \(idx + 1)")
                         ZStack(alignment: .topLeading) {
                             RoundedRectangle(cornerRadius: 9)
                                 .fill(palette.inputFill)
@@ -597,30 +601,42 @@ struct Ref2VAMultiReferencePanel: View {
                                 .padding(5)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                            HStack(spacing: 4) {
-                                Button {
-                                    vm.insertReferenceTagIntoPrompt(tag)
-                                } label: {
-                                    Text(tag)
-                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                                        .foregroundStyle(.white)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2.5)
-                                        .background(Capsule().fill(Color.black.opacity(0.74)))
-                                }
-                                .buttonStyle(.plain)
-                                .help(L("点击将 \(tag) 插入提示词", "Click to insert \(tag) into prompt"))
+                            VStack(alignment: .leading, spacing: 0) {
+                                HStack(spacing: 4) {
+                                    Button {
+                                        vm.insertReferenceTagIntoPrompt(tag)
+                                    } label: {
+                                        Text(tag)
+                                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2.5)
+                                            .background(Capsule().fill(Color.black.opacity(0.74)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(L("点击将 \(tag) 插入提示词", "Click to insert \(tag) into prompt"))
 
+                                    Spacer()
+
+                                    Button {
+                                        vm.removeRef2VAImage(at: idx)
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 15))
+                                            .foregroundStyle(.white, .black.opacity(0.7))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                                 Spacer()
-
-                                Button {
-                                    vm.removeRef2VAImage(at: idx)
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 15))
-                                        .foregroundStyle(.white, .black.opacity(0.7))
-                                }
-                                .buttonStyle(.plain)
+                                Text(imgName)
+                                    .font(.system(size: 9.5, weight: .medium))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1.5)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.62)))
                             }
                             .padding(6)
                         }
@@ -677,8 +693,8 @@ struct Ref2VAMultiReferencePanel: View {
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
                     Text(L(
-                        "动作 / 运镜参考视频（最多 \(StudioViewModel.maxRef2VAVideos) 段 · 点击标签可插入 <Video 1> ~ <Video 3>）",
-                        "Motion / Camera Reference Videos (Up to \(StudioViewModel.maxRef2VAVideos) · Click tag to insert <Video 1>–<Video 3>)"
+                        "动作 / 运镜参考视频（最多 \(StudioViewModel.maxRef2VAVideos) 段 · 提示词输入 @ 或点击标签插入 <Video 1> ~ <Video 3>）",
+                        "Motion / Camera Reference Videos (Up to \(StudioViewModel.maxRef2VAVideos) · Type @ or click tag to insert <Video 1>–<Video 3>)"
                     ))
                     .font(.system(size: 12.5, weight: .semibold))
 
@@ -809,6 +825,148 @@ struct Ref2VAMultiReferencePanel: View {
                     handleVideoDrop(providers: providers)
                 }
             }
+
+            Divider().opacity(0.45)
+
+            // 3. 参考音频区域（上限 3 段）
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.badge.plus")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                    Text(L(
+                        "人声 / 节拍 / 配乐参考音频（最多 \(StudioViewModel.maxRef2VAAudios) 段 · 提示词输入 @ 或点击标签插入 <Audio 1> ~ <Audio 3>）",
+                        "Voice / Rhythm / Music Reference Audios (Up to \(StudioViewModel.maxRef2VAAudios) · Type @ or click tag to insert <Audio 1>–<Audio 3>)"
+                    ))
+                    .font(.system(size: 12.5, weight: .semibold))
+
+                    Spacer()
+
+                    Text("\(vm.ref2vaAudioURLs.count) / \(StudioViewModel.maxRef2VAAudios)")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(vm.ref2vaAudioURLs.count >= StudioViewModel.maxRef2VAAudios ? Color.orange : Color.accentColor)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+
+                    if vm.ref2vaAudioURLs.count < StudioViewModel.maxRef2VAAudios {
+                        Button {
+                            pickMultipleAudios()
+                        } label: {
+                            Label(L("添加参考音频", "Add Audios"), systemImage: "plus.circle.fill")
+                                .font(.caption.weight(.medium))
+                        }
+                        .controlSize(.small)
+                    }
+
+                    if !vm.ref2vaAudioURLs.isEmpty {
+                        Button(role: .destructive) {
+                            vm.clearRef2VAAudios()
+                        } label: {
+                            Text(L("清空", "Clear"))
+                                .font(.caption)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    ForEach(Array(vm.ref2vaAudioURLs.enumerated()), id: \.offset) { slotIdx, aURL in
+                        let aTag = "<Audio \(slotIdx + 1)>"
+                        HStack(spacing: 8) {
+                            Image(systemName: "waveform.circle.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Button {
+                                    vm.insertReferenceTagIntoPrompt(aTag)
+                                } label: {
+                                    Text(aTag)
+                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(Color.accentColor)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 1.5)
+                                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                                }
+                                .buttonStyle(.plain)
+                                .help(L("点击将 \(aTag) 插入提示词", "Click to insert \(aTag) into prompt"))
+
+                                Text(aURL.lastPathComponent)
+                                    .font(.caption.weight(.medium))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+
+                            Spacer(minLength: 4)
+
+                            Button {
+                                vm.removeRef2VAAudio(at: slotIdx)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 62)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(palette.inputFill)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 9)
+                                        .strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 1.1)
+                                )
+                        )
+                    }
+
+                    if vm.ref2vaAudioURLs.count < StudioViewModel.maxRef2VAAudios {
+                        let nextAudIdx = vm.ref2vaAudioURLs.count + 1
+                        let nextAudTag = "<Audio \(nextAudIdx)>"
+                        Button {
+                            pickMultipleAudios()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "waveform.badge.plus")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(Color.accentColor)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(L("添加 \(nextAudTag)（按顺序从 1 递增 · 最多 3 段）", "Add \(nextAudTag) (Sequential 1..3 · Max 3)"))
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                    Text(L("拖入或选择 WAV / MP3 / M4A / FLAC 参考音频", "Drop or browse WAV / MP3 / M4A / FLAC reference audio"))
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 62)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9)
+                                    .fill(palette.inputFill)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 9)
+                                            .strokeBorder(
+                                                isAudioDropTargeted ? Color.accentColor : palette.cardBorder,
+                                                style: StrokeStyle(lineWidth: isAudioDropTargeted ? 2.0 : 1.0, dash: [5])
+                                            )
+                                    )
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .onDrop(of: [.fileURL, .audio], isTargeted: $isAudioDropTargeted) { providers in
+                    handleAudioDrop(providers: providers)
+                }
+            }
         }
     }
 
@@ -817,8 +975,7 @@ struct Ref2VAMultiReferencePanel: View {
         panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = true
         if panel.runModal() == .OK {
-            let loaded = panel.urls.compactMap { NSImage(contentsOf: $0) }
-            vm.addRef2VAImages(loaded)
+            vm.addRef2VAImageURLs(panel.urls)
         }
     }
 
@@ -831,15 +988,24 @@ struct Ref2VAMultiReferencePanel: View {
         }
     }
 
+    private func pickMultipleAudios() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio, .wav, .mp3, .mpeg4Audio]
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK {
+            vm.addRef2VAAudios(panel.urls)
+        }
+    }
+
     private func handleImageDrop(providers: [NSItemProvider]) -> Bool {
         var handled = false
         for provider in providers {
             if provider.canLoadObject(ofClass: URL.self) {
                 handled = true
                 _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    if let url = url, let loaded = NSImage(contentsOf: url) {
+                    if let url = url {
                         DispatchQueue.main.async {
-                            vm.addRef2VAImages([loaded])
+                            vm.addRef2VAImageURLs([url])
                         }
                     }
                 }
@@ -858,6 +1024,24 @@ struct Ref2VAMultiReferencePanel: View {
                     if let url = url, validExts.contains(url.pathExtension.lowercased()) {
                         DispatchQueue.main.async {
                             vm.addRef2VAVideos([url])
+                        }
+                    }
+                }
+            }
+        }
+        return handled
+    }
+
+    private func handleAudioDrop(providers: [NSItemProvider]) -> Bool {
+        let validExts: Set<String> = ["wav", "mp3", "m4a", "flac", "aac", "ogg"]
+        var handled = false
+        for provider in providers {
+            if provider.canLoadObject(ofClass: URL.self) {
+                handled = true
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url = url, validExts.contains(url.pathExtension.lowercased()) {
+                        DispatchQueue.main.async {
+                            vm.addRef2VAAudios([url])
                         }
                     }
                 }

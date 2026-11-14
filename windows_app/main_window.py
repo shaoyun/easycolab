@@ -1241,7 +1241,10 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
 
     def _on_vid_visual_edited(self) -> None:
         if not self._syncing_ui:
-            self.vm.visual_prompt = self.vid_visual_edit.toPlainText()
+            txt = self.vid_visual_edit.toPlainText()
+            self.vm.visual_prompt = txt
+            if txt.endswith("@"):
+                QTimer.singleShot(10, self._show_ref2va_at_mention_menu)
 
     def _on_img_visual_edited(self) -> None:
         if not self._syncing_ui:
@@ -1311,6 +1314,70 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
         self.ref2va_video_paths.clear()
         self._refresh_ref2va_asset_labels()
 
+    def _on_pick_ref2va_audios(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            tr("选择人声/配乐参考音频 (最多 3 段)", "Select Voice/Music Reference Audios (Up to 3)"),
+            "",
+            "Audios (*.wav *.mp3 *.m4a *.flac *.aac *.ogg)",
+        )
+        for f in files:
+            if len(self.ref2va_audio_paths) >= 3:
+                break
+            if f and f not in self.ref2va_audio_paths:
+                self.ref2va_audio_paths.append(f)
+        self._refresh_ref2va_asset_labels()
+
+    def _on_clear_ref2va_audios(self) -> None:
+        self.ref2va_audio_paths.clear()
+        self._refresh_ref2va_asset_labels()
+
+    def _show_ref2va_at_mention_menu(self) -> None:
+        menu = QMenu(self)
+        items: List[tuple[str, str]] = []
+        for i, p in enumerate(getattr(self, "ref2va_image_paths", [])[:9], start=1):
+            tag = f"<Picture {i}>"
+            items.append((f"🖼️ @图片{i} → {tag} ({Path(p).name})", tag))
+        for i, vp in enumerate(getattr(self, "ref2va_video_paths", [])[:3], start=1):
+            tag = f"<Video {i}>"
+            items.append((f"🎬 @视频{i} → {tag} ({Path(vp).name})", tag))
+        for i, ap in enumerate(getattr(self, "ref2va_audio_paths", [])[:3], start=1):
+            tag = f"<Audio {i}>"
+            items.append((f"🎵 @音频{i} → {tag} ({Path(ap).name})", tag))
+        if not items:
+            items = [
+                (tr("🖼️ @图片1 → <Picture 1> (参考图 1)", "🖼️ @Pic1 → <Picture 1>"), "<Picture 1>"),
+                (tr("🖼️ @图片2 → <Picture 2> (参考图 2)", "🖼️ @Pic2 → <Picture 2>"), "<Picture 2>"),
+                (tr("🎬 @视频1 → <Video 1> (参考视频 1)", "🎬 @Vid1 → <Video 1>"), "<Video 1>"),
+                (tr("🎵 @音频1 → <Audio 1> (参考音频 1)", "🎵 @Aud1 → <Audio 1>"), "<Audio 1>"),
+            ]
+
+        def _insert_tag(chosen_tag: str) -> None:
+            cur = self.vid_visual_edit.toPlainText()
+            if cur.endswith("@"):
+                new_txt = cur[:-1] + chosen_tag + " "
+            elif "@" in cur:
+                idx = cur.rfind("@")
+                new_txt = cur[:idx] + chosen_tag + " " + cur[idx + 1 :].lstrip()
+            else:
+                sep = "" if (not cur or cur.endswith(" ")) else " "
+                new_txt = f"{cur}{sep}{chosen_tag} "
+            self._syncing_ui = True
+            self.vid_visual_edit.setPlainText(new_txt)
+            cursor = self.vid_visual_edit.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.vid_visual_edit.setTextCursor(cursor)
+            self._syncing_ui = False
+            self.vm.visual_prompt = new_txt
+
+        for label_txt, tag_val in items:
+            act = QAction(label_txt, self)
+            act.triggered.connect(lambda _chk=False, t=tag_val: _insert_tag(t))
+            menu.addAction(act)
+
+        anchor = getattr(self, "vid_at_mention_btn", self.vid_visual_edit)
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
     def _refresh_ref2va_asset_labels(self) -> None:
         if not hasattr(self, "ref2va_img_status_lbl"):
             return
@@ -1332,6 +1399,16 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
             self.ref2va_vid_status_lbl.setText(
                 tr("参考视频 (0/3)：尚未添加 (<Video 1> ~ <Video 3>)", "Ref Videos (0/3): None added (<Video 1>–<Video 3>)")
             )
+        if hasattr(self, "ref2va_aud_status_lbl"):
+            if getattr(self, "ref2va_audio_paths", []):
+                anames = [f"<Audio {i+1}> {Path(p).name}" for i, p in enumerate(self.ref2va_audio_paths[:3])]
+                self.ref2va_aud_status_lbl.setText(
+                    tr(f"参考音频 ({len(self.ref2va_audio_paths)}/3)：" + " · ".join(anames), f"Ref Audios ({len(self.ref2va_audio_paths)}/3): " + " · ".join(anames))
+                )
+            else:
+                self.ref2va_aud_status_lbl.setText(
+                    tr("参考音频 (0/3)：尚未添加 (<Audio 1> ~ <Audio 3>)", "Ref Audios (0/3): None added (<Audio 1>–<Audio 3>)")
+                )
 
     def _trigger_generate(self) -> None:
         spec = self.vm.active_model_spec
@@ -1344,6 +1421,7 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
         last_b64: Optional[str] = None
         ref_imgs_b64: List[str] = []
         ref_vids_b64: List[str] = []
+        ref_auds_b64: List[str] = []
         if spec.modality in (ModelModality.VIDEO_AUDIO, ModelModality.VIDEO):
             self.vm.visual_prompt = self.vid_visual_edit.toPlainText()
             if self.vm.task_mode_id in ("fl2va", "ref2va"):
@@ -1364,6 +1442,13 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
                             ref_vids_b64.append(base64.b64encode(raw_vid).decode("ascii"))
                     except Exception:
                         pass
+                for ap in getattr(self, "ref2va_audio_paths", [])[:3]:
+                    try:
+                        raw_aud = Path(ap).read_bytes()
+                        if raw_aud:
+                            ref_auds_b64.append(base64.b64encode(raw_aud).decode("ascii"))
+                    except Exception:
+                        pass
         elif spec.modality == ModelModality.LLM_VLM:
             self.vm.visual_prompt = self.llm_prompt_edit.toPlainText()
             if self.vm.task_mode_id == "vlm":
@@ -1381,6 +1466,7 @@ class EasyColabMainWindow(WorkspaceMixin, QMainWindow):
             last_frame_b64=last_b64,
             ref_images_b64=ref_imgs_b64 or None,
             ref_videos_b64=ref_vids_b64 or None,
+            ref_audios_b64=ref_auds_b64 or None,
         )
         if spec.modality == ModelModality.LLM_VLM and not self.vm.visual_prompt:
             self._syncing_ui = True
