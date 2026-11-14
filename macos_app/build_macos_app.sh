@@ -4,6 +4,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+if [ -z "${SDKROOT}" ] && [ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk" ]; then
+    export SDKROOT="/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
+fi
+
 APP_NAME="EasyColab"
 EXEC_NAME="EasyColab"
 VERSION_FILE="${PROJECT_ROOT}/VERSION"

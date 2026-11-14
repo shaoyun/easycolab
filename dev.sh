@@ -38,6 +38,9 @@ case "${MODE}" in
         ;;
 
     mac|--mac)
+        if [ -z "${SDKROOT}" ] && [ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk" ]; then
+            export SDKROOT="/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
+        fi
         APP_DIR="${PROJECT_ROOT}/EasyColab.app"
         CONTENTS_DIR="${APP_DIR}/Contents"
         MACOS_DIR="${CONTENTS_DIR}/MacOS"
@@ -56,6 +59,7 @@ case "${MODE}" in
             ARCH="$(uname -m)"
             echo "⚡ 正在极速编译 macOS 客户端 (${ARCH}, Debug -Onone，跳过图标生成与 zip 打包)..."
             swiftc -Onone \
+                -module-cache-path /tmp/easycolab_swift_cache \
                 -target "${ARCH}-apple-macos13.0" \
                 -parse-as-library \
                 -framework SwiftUI \
