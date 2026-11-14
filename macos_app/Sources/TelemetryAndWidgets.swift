@@ -713,45 +713,77 @@ struct Ref2VAMultiReferencePanel: View {
                 }
 
                 HStack(spacing: 10) {
-                    ForEach(0..<StudioViewModel.maxRef2VAVideos, id: \.self) { slotIdx in
+                    ForEach(Array(vm.ref2vaVideoURLs.enumerated()), id: \.offset) { slotIdx, vURL in
                         let vTag = "<Video \(slotIdx + 1)>"
-                        if slotIdx < vm.ref2vaVideoURLs.count {
-                            let vURL = vm.ref2vaVideoURLs[slotIdx]
-                            HStack(spacing: 8) {
-                                Image(systemName: "film.stack.fill")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundStyle(Color.accentColor)
+                        HStack(spacing: 8) {
+                            Image(systemName: "film.stack.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
 
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Button {
-                                        vm.insertReferenceTagIntoPrompt(vTag)
-                                    } label: {
-                                        Text(vTag)
-                                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                                            .foregroundStyle(Color.accentColor)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 1.5)
-                                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help(L("点击将 \(vTag) 插入提示词", "Click to insert \(vTag) into prompt"))
-
-                                    Text(vURL.lastPathComponent)
-                                        .font(.caption.weight(.medium))
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-
-                                Spacer(minLength: 4)
-
+                            VStack(alignment: .leading, spacing: 3) {
                                 Button {
-                                    vm.removeRef2VAVideo(at: slotIdx)
+                                    vm.insertReferenceTagIntoPrompt(vTag)
                                 } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 15))
-                                        .foregroundStyle(.secondary)
+                                    Text(vTag)
+                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(Color.accentColor)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 1.5)
+                                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
                                 }
                                 .buttonStyle(.plain)
+                                .help(L("点击将 \(vTag) 插入提示词", "Click to insert \(vTag) into prompt"))
+
+                                Text(vURL.lastPathComponent)
+                                    .font(.caption.weight(.medium))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+
+                            Spacer(minLength: 4)
+
+                            Button {
+                                vm.removeRef2VAVideo(at: slotIdx)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 62)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(palette.inputFill)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 9)
+                                        .strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 1.1)
+                                )
+                        )
+                    }
+
+                    if vm.ref2vaVideoURLs.count < StudioViewModel.maxRef2VAVideos {
+                        let nextVidIdx = vm.ref2vaVideoURLs.count + 1
+                        let nextVidTag = "<Video \(nextVidIdx)>"
+                        Button {
+                            pickMultipleVideos()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "video.badge.plus")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(Color.accentColor)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(L("添加 \(nextVidTag)（按顺序从 1 递增 · 最多 3 段）", "Add \(nextVidTag) (Sequential 1..3 · Max 3)"))
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                    Text(L("拖入或选择 MP4 / MOV 动作运镜参考视频", "Drop or browse MP4 / MOV motion reference video"))
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 0)
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
@@ -762,46 +794,15 @@ struct Ref2VAMultiReferencePanel: View {
                                     .fill(palette.inputFill)
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 9)
-                                            .strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 1.1)
+                                            .strokeBorder(
+                                                isVideoDropTargeted ? Color.accentColor : palette.cardBorder,
+                                                style: StrokeStyle(lineWidth: isVideoDropTargeted ? 2.0 : 1.0, dash: [5])
+                                            )
                                     )
                             )
-                        } else {
-                            Button {
-                                pickMultipleVideos()
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "video.badge.plus")
-                                        .font(.system(size: 16, weight: .medium))
-                                        .foregroundStyle(Color.secondary)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(L("参考视频 \(slotIdx + 1) (\(vTag) · 可选)", "Ref Video \(slotIdx + 1) (\(vTag) · Optional)"))
-                                            .font(.system(size: 11.5, weight: .semibold))
-                                            .foregroundStyle(.primary)
-                                        Text(L("拖入或选择 MP4 / MOV", "Drop or browse MP4 / MOV"))
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Spacer(minLength: 0)
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 8)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 62)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 9)
-                                        .fill(palette.inputFill)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 9)
-                                                .strokeBorder(
-                                                    isVideoDropTargeted ? Color.accentColor : palette.cardBorder,
-                                                    style: StrokeStyle(lineWidth: isVideoDropTargeted ? 2.0 : 1.0, dash: [5])
-                                                )
-                                        )
-                                )
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                     }
                 }
                 .onDrop(of: [.fileURL, .movie], isTargeted: $isVideoDropTargeted) { providers in
