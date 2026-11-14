@@ -28,10 +28,11 @@ if __name__ == "__main__" and not _DEPLOY_PASSWORD and (authenticated_ingress is
     GRADIO_BACKEND = GRADIO_INGRESS
     COMFY_BACKEND = COMFY_INGRESS
 import subprocess
+import tempfile
 import threading
 from collections import deque
 from datetime import datetime
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Sequence
 
 # ==============================================================================
 # 实时终端进度与 tqdm 捕获器 (将 Colab 网页端的实时下载进度同步给 macOS App)
@@ -118,7 +119,6 @@ def ensure_runtime_dependencies():
     missing = []
     for pkg, mod in [
         ("av", "av"),
-        ("hf_transfer", "hf_transfer"),
         ("librosa", "librosa"),
         ("soundfile", "soundfile"),
         ("sentencepiece", "sentencepiece"),
@@ -140,7 +140,8 @@ _IS_LOCAL_PREVIEW = (
 )
 if not _IS_LOCAL_PREVIEW:
     ensure_runtime_dependencies()
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
 # 强制 DiffSynth-Studio 所有内置下载走 HuggingFace 国际高速源 (彻底杜绝回退到国内 ModelScope 导致 1~2MB/s)
 os.environ["DIFFSYNTH_DISK_MAP_BUFFER_SIZE"] = str(10**12)
 os.environ["DIFFSYNTH_DOWNLOAD_SOURCE"] = "huggingface"
