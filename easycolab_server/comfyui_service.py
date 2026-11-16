@@ -354,6 +354,176 @@ app.registerExtension({
     except Exception as e:
         print(f"[ComfyUI] 写入 EasyColab 默认工作流引导扩展提示: {e}")
 
+_H3_CHUNK_FFN_SRC = '''"""Lossless feed-forward chunking node for MiniMax H3.
+
+Splits the token sequence in each DiT block's SwiGLU MLP along dim=-2 when the
+token count exceeds `seq_threshold`. Because MLP layers are point-wise across
+tokens, the output is mathematically identical to unchunked execution while
+cutting peak activation VRAM by ~chunks x on high-resolution (e.g. 1080P) runs.
+"""
+import functools
+import torch
+
+
+def _make_chunked_forward(orig_forward, chunks, seq_threshold):
+    base_forward = getattr(orig_forward, "_orig_forward", orig_forward)
+
+    @functools.wraps(base_forward)
+    def _chunked_forward(*args, **kwargs):
+        if args:
+            x = args[0]
+            rest = args[1:]
+            use_kw = False
+        elif "x" in kwargs:
+            x = kwargs["x"]
+            rest = ()
+            use_kw = True
+        else:
+            return base_forward(*args, **kwargs)
+
+        if not isinstance(x, torch.Tensor) or x.ndim < 2:
+            return base_forward(*args, **kwargs)
+
+        seq_len = x.shape[-2]
+        if chunks <= 1 or seq_len <= seq_threshold:
+            return base_forward(*args, **kwargs)
+
+        step = ((seq_len + chunks - 1) // chunks + 63) // 64 * 64
+        step = max(64, step)
+        if step >= seq_len:
+            return base_forward(*args, **kwargs)
+
+        def call_slice(x_slice):
+            if use_kw:
+                kw = dict(kwargs)
+                kw["x"] = x_slice
+                return base_forward(**kw)
+            return base_forward(x_slice, *rest, **kwargs)
+
+        first_len = min(step, seq_len)
+        y0 = call_slice(x.narrow(-2, 0, first_len).contiguous())
+        out_shape = list(y0.shape)
+        out_shape[-2] = seq_len
+        out = torch.empty(out_shape, dtype=y0.dtype, device=y0.device)
+        out.narrow(-2, 0, first_len).copy_(y0)
+        del y0
+
+        for start in range(first_len, seq_len, step):
+            length = min(step, seq_len - start)
+            yi = call_slice(x.narrow(-2, start, length).contiguous())
+            out.narrow(-2, start, length).copy_(yi)
+            del yi
+        return out
+
+    _chunked_forward._is_h3_chunk_ffn = True
+    _chunked_forward._orig_forward = base_forward
+    return _chunked_forward
+
+
+def _should_enable_chunk_ffn(max_vram_gib=28.0):
+    try:
+        if torch.cuda.is_available():
+            total = torch.cuda.get_device_properties(0).total_memory
+            if total >= max_vram_gib * (1024 ** 3):
+                return False
+    except Exception:
+        pass
+    return True
+
+
+class MiniMaxChunkFeedForward:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "chunks": ("INT", {"default": 2, "min": 1, "max": 64, "step": 1}),
+                "seq_threshold": ("INT", {"default": 24576, "min": 0, "max": 1000000, "step": 64}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+    CATEGORY = "minimax"
+
+    def patch(self, model, chunks=2, seq_threshold=24576):
+        chunks = int(chunks)
+        seq_threshold = int(seq_threshold)
+        if chunks <= 1 or not _should_enable_chunk_ffn():
+            return (model,)
+        m = model.clone()
+        diffusion_model = m.get_model_object("diffusion_model")
+        blocks = getattr(diffusion_model, "blocks", None)
+        if blocks is None:
+            return (m,)
+        for i, block in enumerate(blocks):
+            mlp = getattr(block, "mlp", None)
+            orig_forward = getattr(mlp, "forward", None)
+            if orig_forward is None:
+                continue
+            m.add_object_patch(
+                f"diffusion_model.blocks.{i}.mlp.forward",
+                _make_chunked_forward(orig_forward, chunks, seq_threshold),
+            )
+        return (m,)
+
+
+_already_registered = False
+try:
+    import nodes  # type: ignore
+    _already_registered = "MiniMaxChunkFeedForward" in getattr(nodes, "NODE_CLASS_MAPPINGS", {})
+except Exception:
+    pass
+
+if _already_registered:
+    NODE_CLASS_MAPPINGS = {}
+    NODE_DISPLAY_NAME_MAPPINGS = {}
+else:
+    NODE_CLASS_MAPPINGS = {
+        "MiniMaxChunkFeedForward": MiniMaxChunkFeedForward,
+    }
+    NODE_DISPLAY_NAME_MAPPINGS = {
+        "MiniMaxChunkFeedForward": "MiniMax H3 Chunk FeedForward",
+    }
+'''
+
+def _comfy_subprocess_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    cur = [p.strip() for p in env.get("PYTORCH_CUDA_ALLOC_CONF", "").split(",") if p.strip()]
+    if not any(p.startswith("expandable_segments:") for p in cur):
+        cur.append("expandable_segments:True")
+    env["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(cur)
+    return env
+
+def _ensure_h3_chunk_ffn_node(comfy_root: str, persist_root: str = "") -> bool:
+    """在 custom_nodes 下写入轻量无损 MiniMaxChunkFeedForward 节点，若在 comfy_root 新增或变更则返回 True。"""
+    changed = False
+    comfy_target = os.path.abspath(os.path.join(comfy_root, "custom_nodes", "h3_chunk_ffn", "__init__.py")) if comfy_root else ""
+    targets: List[str] = []
+    if comfy_root and os.path.isdir(comfy_root):
+        targets.append(comfy_target)
+    if persist_root:
+        p_target = os.path.abspath(os.path.join(persist_root, "custom_nodes", "h3_chunk_ffn", "__init__.py"))
+        if p_target not in targets:
+            targets.append(p_target)
+    for dst in targets:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        prev = None
+        if os.path.isfile(dst):
+            try:
+                with open(dst, "r", encoding="utf-8") as rf:
+                    prev = rf.read()
+            except Exception:
+                prev = None
+        if prev != _H3_CHUNK_FFN_SRC:
+            tmp = dst + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as wf:
+                wf.write(_H3_CHUNK_FFN_SRC)
+            os.replace(tmp, dst)
+            if comfy_target and dst == comfy_target:
+                changed = True
+    return changed
+
 def _prune_workflow_dangling_links(wf_data: Dict[str, Any]):
     """确保每个节点的 inputs/outputs 链接表与顶层 links 完全一致，彻底杜绝 LiteGraph 断链警告"""
     node_ids = {n.get("id") for n in wf_data.get("nodes", [])}
@@ -1505,6 +1675,7 @@ def start_comfyui_core(unload_existing: bool = False, force_restart: bool = Fals
                 print(f"[ComfyUI] 正在预装核心插件 {node_dir_name}...")
                 subprocess.run(["git", "clone", "--depth", "1", repo_url, target_node_dir], check=False)
 
+        _ensure_h3_chunk_ffn_node(comfy_root, persist_root)
         _ensure_easycolab_comfy_preset_helper(comfy_root, persist_root)
         _ensure_comfyui_manager_tunnel_config(comfy_root, persist_root)
 
@@ -1530,6 +1701,7 @@ def start_comfyui_core(unload_existing: bool = False, force_restart: bool = Fals
         comfy_proc = subprocess.Popen(
             comfy_cmd,
             cwd=comfy_root,
+            env=_comfy_subprocess_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 
 from . import runtime_state as rs
-from .comfyui_service import COMFY_STANDARD_MODEL_SUBDIRS, _COMFY_STATUS_CACHE, _build_and_install_comfy_preset_workflows, _download_comfy_model_entry, _ensure_comfyui_beginner_assets, _install_persisted_custom_node_requirements, _open_cloudflared_tunnel, _resolve_comfyui_persistence_paths, _safe_symlink_dir, start_comfyui_core, stop_comfyui_core, sync_comfyui_to_drive_core
+from .comfyui_service import COMFY_STANDARD_MODEL_SUBDIRS, _COMFY_STATUS_CACHE, _build_and_install_comfy_preset_workflows, _download_comfy_model_entry, _ensure_comfyui_beginner_assets, _ensure_h3_chunk_ffn_node, _install_persisted_custom_node_requirements, _open_cloudflared_tunnel, _resolve_comfyui_persistence_paths, _safe_symlink_dir, start_comfyui_core, stop_comfyui_core, sync_comfyui_to_drive_core
 from .media_pipeline import unload_model_from_vram_core
 from .model_catalog import TOYBOX_CORE_MODELS, TOYBOX_CUSTOM_NODES, TOYBOX_ENHANCER_REPO_URL, TOYBOX_IMAGE_MODELS, TOYBOX_REPO_URL, TOYBOX_REWRITER_MODELS, fast_parallel_hf_download
 from .runtime_state import COMFYUI_STATE, COMFY_BACKEND, LOADED_RUNTIMES, TOYBOX_BACKEND, TOYBOX_INGRESS, TOYBOX_LOCK, TOYBOX_STATE, _DEPLOY_PASSWORD, _IS_LOCAL_PREVIEW, _has_rclone_drive_remote, authenticated_ingress, torch, touch_activity
@@ -280,6 +280,85 @@ def _localize_toybox_to_zh_cn(app_dir: str, allow_pip: bool = True) -> int:
         print(f"[H3 Toybox] 已将 {changed} 个界面/后端文件本地化为简体中文 (zh-CN)。")
     return changed
 
+def _patch_toybox_chunk_ffn(app_dir: str) -> bool:
+    """确保拉取的 toybox/server.py 保留节点 401 (MiniMaxChunkFeedForward) 以无损降低高分辨率显存峰值。"""
+    srv_path = os.path.join(app_dir, "server.py") if app_dir else ""
+    if not srv_path or not os.path.isfile(srv_path):
+        return False
+    try:
+        with open(srv_path, "r", encoding="utf-8") as rf:
+            raw = rf.read()
+    except Exception:
+        return False
+    if "def has_chunk_ffn(" in raw:
+        return False
+
+    updated = raw
+    replacements = [
+        (
+            'N_COND, N_SAMPLER, N_SCHED, N_SHIFT, N_BRIDGE = "265", "397", "261", "333", "402"',
+            'N_COND, N_SAMPLER, N_SCHED, N_SHIFT, N_BRIDGE, N_CHUNK = "265", "397", "261", "333", "402", "401"',
+        ),
+        (
+            'PREVIEW_ONLY = ("401", "329", "364", "51", "252")',
+            'PREVIEW_ONLY = ("329", "364", "51", "252")',
+        ),
+        (
+            'def history_entry(cfg, prompt_id):\n    return comfy(cfg, f"/history/{prompt_id}").get(prompt_id)\n',
+            'def history_entry(cfg, prompt_id):\n    return comfy(cfg, f"/history/{prompt_id}").get(prompt_id)\n\n\n'
+            '_HAS_CHUNK_FFN = False\n\n\n'
+            'def has_chunk_ffn(cfg):\n'
+            '    global _HAS_CHUNK_FFN\n'
+            '    if _HAS_CHUNK_FFN:\n'
+            '        return True\n'
+            '    try:\n'
+            '        info = comfy(cfg, "/object_info/MiniMaxChunkFeedForward", timeout=5)\n'
+            '        if "MiniMaxChunkFeedForward" in (info or {}):\n'
+            '            _HAS_CHUNK_FFN = True\n'
+            '    except Exception:\n'
+            '        pass\n'
+            '    return _HAS_CHUNK_FFN\n',
+        ),
+        (
+            '    for node_id in ("329", "401"):\n'
+            '        if node_id in wf:\n'
+            '            bypass(wf, node_id)\n'
+            '    for node_id in PREVIEW_ONLY:\n'
+            '        wf.pop(node_id, None)\n'
+            '    width, height = size',
+            '    if "329" in wf:\n'
+            '        bypass(wf, "329")\n'
+            '    for node_id in PREVIEW_ONLY:\n'
+            '        wf.pop(node_id, None)\n'
+            '    width, height = size\n'
+            '    if N_CHUNK in wf:\n'
+            '        if min(width, height) >= 1000 and has_chunk_ffn(cfg):\n'
+            '            wf[N_CHUNK]["inputs"]["chunks"] = 4\n'
+            '            wf[N_CHUNK]["inputs"]["seq_threshold"] = 24576\n'
+            '        else:\n'
+            '            bypass(wf, N_CHUNK)',
+        ),
+    ]
+    for old_s, new_s in replacements:
+        if old_s not in updated:
+            print("[H3 Toybox] 提示: server.py 结构已变更，跳过 401 ChunkFeedForward 自动补丁。")
+            return False
+        updated = updated.replace(old_s, new_s, 1)
+
+    try:
+        import ast as _ast
+        _ast.parse(updated, filename="server.py")
+    except SyntaxError as se:
+        print(f"[H3 Toybox] 警告: 补齐 has_chunk_ffn 后 server.py 语法校验未通过，跳过写回: {se}")
+        return False
+
+    tmp = srv_path + ".chunk.tmp"
+    with open(tmp, "w", encoding="utf-8") as wf:
+        wf.write(updated)
+    os.replace(tmp, srv_path)
+    print("[H3 Toybox] 已在 server.py 启用无损 MiniMaxChunkFeedForward (401) 显存优化。")
+    return True
+
 def _clone_or_pull_git_repo(url: str, dest_dir: str, reset_local: bool = False) -> bool:
     """若目标目录不存在则浅克隆仓库（返回 True 表示新安装），存在则静默 fast-forward 更新。"""
     if not os.path.isdir(dest_dir):
@@ -305,6 +384,7 @@ def _ensure_toybox_repos_and_nodes(hf_token: str = "") -> Tuple[bool, str, bool]
     # 1. 拉取 H3 Toybox 本体与外置导演增强技能目录，并将 Toybox 界面/提示转为大陆简体中文
     _clone_or_pull_git_repo(TOYBOX_REPO_URL, paths["repo_dir"], reset_local=True)
     _localize_toybox_to_zh_cn(app_dir)
+    _patch_toybox_chunk_ffn(app_dir)
     _clone_or_pull_git_repo(TOYBOX_ENHANCER_REPO_URL, paths["enhancer_dir"])
 
     # 2. 安装/检查 Toybox 所需的 3 个 ComfyUI 自定义节点（仅在缺失时浅克隆，避免覆盖已有依赖）
@@ -319,6 +399,9 @@ def _ensure_toybox_repos_and_nodes(hf_token: str = "") -> Tuple[bool, str, bool]
         if not os.path.isdir(dst_node):
             subprocess.run(["git", "clone", "--depth", "1", node_url, dst_node], check=True)
             newly_installed_nodes = True
+
+    if rs.resolve_callable("_ensure_h3_chunk_ffn_node", _ensure_h3_chunk_ffn_node)(comfy_root, persist_root):
+        newly_installed_nodes = True
 
     # 3. 补齐 semantic_bridge 与模型子目录软链（供 BUNNY_H3_ActionLogic_Bridge 等权重共享）
     for sub in COMFY_STANDARD_MODEL_SUBDIRS:
